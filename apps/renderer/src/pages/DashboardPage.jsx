@@ -1,0 +1,8 @@
+/**
+ * DashboardPage — Premium AI Command Center dashboard
+ */
+import Dashboard from "@/components/dashboard/Dashboard";
+
+export default function DashboardPage() {
+    return <Dashboard />;
+}
