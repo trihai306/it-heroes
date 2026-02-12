@@ -6,6 +6,7 @@ from models.session import AgentSession
 from models.task import Task, TaskStatus
 from models.event_log import EventLog
 from models.workflow import Workflow
+from models.office_layout import OfficeLayout
 
 __all__ = [
     "Project",
@@ -16,4 +17,5 @@ __all__ = [
     "TaskStatus",
     "EventLog",
     "Workflow",
+    "OfficeLayout",
 ]

@@ -15,3 +15,4 @@ export { default as projectService } from "./projectService";
 export { default as taskService } from "./taskService";
 export { default as workflowService } from "./workflowService";
 export { default as systemService } from "./systemService";
+export { default as officeLayoutService } from "./officeLayoutService";

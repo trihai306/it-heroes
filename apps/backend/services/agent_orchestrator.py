@@ -22,6 +22,8 @@ from websocket.events import (
     EVENT_AGENT_STATUS,
     EVENT_TASK_UPDATED,
     EVENT_LOG_APPEND,
+    EVENT_TOOL_EXECUTION,
+    EVENT_SESSION_RESULT,
 )
 
 logger = logging.getLogger(__name__)
@@ -238,9 +240,21 @@ class AgentOrchestrator:
                     event_type,
                 )
 
+                # Emit richer tool events (from Agent SDK adapter)
+                if event_type in ("tool_use", "tool_result"):
+                    await self._emit_tool_event(
+                        agent.project_id, agent.id, event
+                    )
+
                 # Check for completion/error signals
                 if event_type == "complete":
                     completed_ok = True
+                    # Emit session result metadata if available
+                    raw = event.get("raw")
+                    if raw:
+                        await self._emit_session_result(
+                            agent.project_id, agent.id, raw
+                        )
                     logger.info(f"Agent-{agent.id} completed")
                 elif event_type == "error":
                     completed_ok = False
@@ -332,6 +346,43 @@ class AgentOrchestrator:
                     "agent_id": agent_id,
                     "message": message,
                     "level": level,
+                },
+            ),
+        )
+
+    async def _emit_tool_event(
+        self, project_id: int, agent_id: int, event: dict
+    ) -> None:
+        """Emit rich tool execution event (from Agent SDK adapter)."""
+        await self.ws.broadcast(
+            project_id,
+            WSEvent(
+                type=EVENT_TOOL_EXECUTION,
+                data={
+                    "agent_id": agent_id,
+                    "event_type": event.get("type"),
+                    "content": event.get("content", ""),
+                    "raw": event.get("raw"),
+                    "is_error": event.get("is_error", False),
+                },
+            ),
+        )
+
+    async def _emit_session_result(
+        self, project_id: int, agent_id: int, result: dict
+    ) -> None:
+        """Emit session completion metadata (from Agent SDK adapter)."""
+        await self.ws.broadcast(
+            project_id,
+            WSEvent(
+                type=EVENT_SESSION_RESULT,
+                data={
+                    "agent_id": agent_id,
+                    "num_turns": result.get("num_turns"),
+                    "duration_ms": result.get("duration_ms"),
+                    "total_cost_usd": result.get("total_cost_usd"),
+                    "session_id": result.get("session_id"),
+                    "is_error": result.get("is_error", False),
                 },
             ),
         )

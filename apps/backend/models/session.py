@@ -25,3 +25,7 @@ class AgentSession(SQLModel, table=True):
     branch_name: Optional[str] = None
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_seen: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # SDK session metadata
+    sdk_session_id: Optional[str] = None
+    total_cost_usd: Optional[float] = None
+    num_turns: Optional[int] = None

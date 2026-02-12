@@ -17,7 +17,6 @@ import {
     MenuFoldOutlined,
     MenuUnfoldOutlined,
     AppstoreOutlined,
-    SmileOutlined,
     ProjectOutlined,
     TeamOutlined,
     ThunderboltOutlined,
@@ -30,7 +29,6 @@ import useAuthStore from "@/stores/useAuthStore";
 /* ── Navigation items ────────────────────────────────────────── */
 const NAV_ITEMS = [
     { key: "/dashboard", icon: <AppstoreOutlined />, label: "Dashboard", desc: "Overview & stats" },
-    { key: "/chibi", icon: <SmileOutlined />, label: "Chibi Office", desc: "3D figurines" },
     { key: "/kanban", icon: <ProjectOutlined />, label: "Kanban Board", desc: "Task management" },
     { key: "/team", icon: <TeamOutlined />, label: "Team", desc: "Manage agents" },
 ];

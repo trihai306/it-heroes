@@ -16,11 +16,12 @@ from routers.workflows import router as workflows_router
 from routers.auth import router as auth_router
 from routers.teams import router as teams_router
 from routers.system import router as system_router
+from routers.office_layouts import router as office_layouts_router
 from websocket.manager import ConnectionManager
 from websocket.events import WSEvent
 from services.agent_orchestrator import AgentOrchestrator
-from services.simulation import SimulationEngine
 from services.team_manager import TeamManager
+from services.unified_orchestrator import UnifiedTeamOrchestrator
 
 # ─── Logging ───────────────────────────────────────────────────────────
 
@@ -39,14 +40,11 @@ async def lifespan(app: FastAPI):
     logger.info(f"🏢 {settings.APP_NAME} v{settings.APP_VERSION} starting...")
     create_db_and_tables()
     logger.info("✅ Database tables created")
-    # Start simulation engine
-    await simulation.start()
-    logger.info("✅ Simulation engine started")
     yield
     # Graceful shutdown: stop all agents
     logger.info("👋 Shutting down...")
-    await simulation.stop()
     await orchestrator.claude.stop_all()
+    await unified_orchestrator.shutdown_all()
     logger.info("✅ All agent sessions stopped")
 
 
@@ -66,11 +64,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Shared WebSocket manager + Orchestrator + Simulation singletons
+# Shared WebSocket manager + Orchestrator singletons
 ws_manager = ConnectionManager()
 orchestrator = AgentOrchestrator(ws_manager)
-simulation = SimulationEngine(ws_manager)
 team_manager = TeamManager(ws_manager)
+unified_orchestrator = UnifiedTeamOrchestrator(ws_manager)
 
 # ─── REST Routers ──────────────────────────────────────────────────────
 
@@ -83,6 +81,7 @@ app.include_router(workflows_router)
 app.include_router(auth_router)
 app.include_router(teams_router)
 app.include_router(system_router)
+app.include_router(office_layouts_router)
 
 
 # ─── WebSocket ─────────────────────────────────────────────────────────
@@ -105,9 +104,8 @@ async def websocket_endpoint(websocket: WebSocket, project_id: int):
                 msg = json.loads(data)
                 msg_type = msg.get("type", "")
 
-                if msg_type == "positions.sync" and msg.get("data"):
-                    # Client is syncing its local walk positions to the server
-                    simulation.receive_client_sync(msg["data"])
+                if msg_type == "ping":
+                    pass  # heartbeat
                 else:
                     logger.debug(f"WS recv project={project_id}: {msg_type}")
             except (json.JSONDecodeError, Exception):

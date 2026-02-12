@@ -463,7 +463,7 @@ export default function KanbanBoard() {
                 footer={null}
                 width="85vw"
                 styles={{ body: { padding: 0, height: "70vh", display: "flex", flexDirection: "column" } }}
-                destroyOnClose
+                destroyOnHidden
             >
                 <WorkflowFlow
                     availableRoles={departmentColumns.filter((c) => c.key !== "__unassigned__").map((c) => c.key)}

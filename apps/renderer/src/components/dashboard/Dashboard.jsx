@@ -21,7 +21,6 @@ import {
     CheckCircleFilled,
     ExclamationCircleFilled,
     PlayCircleFilled,
-    SmileOutlined,
     ArrowRightOutlined,
     BugOutlined,
     CodeOutlined,
@@ -363,10 +362,6 @@ export default function Dashboard() {
                     {/* Quick Nav */}
                     <DashboardPanel icon={<ThunderboltOutlined />} title="Quick Actions">
                         <div className="quick-nav-grid">
-                            <button className="quick-nav-btn" onClick={() => navigate("/chibi")}>
-                                <SmileOutlined />
-                                <span>3D Office</span>
-                            </button>
                             <button className="quick-nav-btn" onClick={() => navigate("/kanban")}>
                                 <ProjectOutlined />
                                 <span>Kanban</span>
@@ -567,19 +562,21 @@ function AgentDetail({ agent, status, tasks: agentTasks }) {
 
 function SummonTeamButton() {
     const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
-    const createTeam = useAgentStore((s) => s.createTeam);
+    const createTeamFromPreset = useAgentStore((s) => s.createTeamFromPreset);
+    const [summoning, setSummoning] = useState(false);
     const handleSummon = async () => {
-        await createTeam(selectedProjectId, [
-            { name: "Lead Agent", role: "lead", avatar_key: "lead" },
-            { name: "Backend Dev", role: "backend", avatar_key: "backend" },
-            { name: "Frontend Dev", role: "frontend", avatar_key: "frontend" },
-            { name: "QA Engineer", role: "qa", avatar_key: "qa" },
-        ]);
+        if (!selectedProjectId || summoning) return;
+        setSummoning(true);
+        try {
+            await createTeamFromPreset(selectedProjectId, "fullstack");
+        } finally {
+            setSummoning(false);
+        }
     };
     return (
-        <button className="dashboard-summon-btn" onClick={handleSummon}>
+        <button className="dashboard-summon-btn" onClick={handleSummon} disabled={summoning}>
             <ThunderboltOutlined />
-            Summon AI Team
+            {summoning ? "Summoning..." : "Summon AI Team"}
         </button>
     );
 }

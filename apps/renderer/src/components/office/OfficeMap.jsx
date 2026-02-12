@@ -231,16 +231,18 @@ function AgentDetail({ agent, status, tasks: agentTasks }) {
 /* ─── Summon Team Button ───────────────────────────────────────────── */
 function SummonTeamButton() {
     const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
-    const createTeam = useAgentStore((s) => s.createTeam);
+    const createTeamFromPreset = useAgentStore((s) => s.createTeamFromPreset);
+    const [summoning, setSummoning] = useState(false);
     const handleSummon = async () => {
-        await createTeam(selectedProjectId, [
-            { name: "Lead Agent", role: "lead", avatar_key: "lead" },
-            { name: "Backend Dev", role: "backend", avatar_key: "backend" },
-            { name: "Frontend Dev", role: "frontend", avatar_key: "frontend" },
-            { name: "QA Engineer", role: "qa", avatar_key: "qa" },
-        ]);
+        if (!selectedProjectId || summoning) return;
+        setSummoning(true);
+        try {
+            await createTeamFromPreset(selectedProjectId, "fullstack");
+        } finally {
+            setSummoning(false);
+        }
     };
-    return <Button type="primary" icon={<ThunderboltOutlined />} onClick={handleSummon}>Summon Team</Button>;
+    return <Button type="primary" icon={<ThunderboltOutlined />} onClick={handleSummon} loading={summoning}>Summon Team</Button>;
 }
 
 /* ─── Helpers ──────────────────────────────────────────────────────── */

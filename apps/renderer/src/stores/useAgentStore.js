@@ -65,6 +65,70 @@ const useAgentStore = create((set, get) => ({
         }
     },
 
+    createTeamFromPreset: async (projectId, presetId, model = "") => {
+        set({ loading: true });
+        try {
+            const data = await agentService.createTeamFromPreset(projectId, { presetId, model });
+            set({
+                agents: data.agents || [],
+                teamConfig: data,
+                loading: false,
+            });
+            return data;
+        } catch (err) {
+            set({ loading: false });
+            throw err;
+        }
+    },
+
+    createTeamFromPrompt: async (projectId, prompt, teamName = "chibi-team", model = "") => {
+        set({ loading: true });
+        try {
+            const data = await agentService.createTeamFromPrompt(projectId, { prompt, teamName, model });
+            set({
+                agents: data.agents || [],
+                teamConfig: data,
+                loading: false,
+            });
+            return data;
+        } catch (err) {
+            set({ loading: false });
+            throw err;
+        }
+    },
+
+    dispatchTeam: async (projectId) => {
+        try {
+            return await agentService.dispatchTeam(projectId);
+        } catch {
+            return null;
+        }
+    },
+
+    startAgent: async (projectId, agentId, taskId) => {
+        try {
+            return await agentService.startAgent(projectId, agentId, taskId);
+        } catch {
+            return null;
+        }
+    },
+
+    stopAgent: async (projectId, agentId) => {
+        try {
+            const result = await agentService.stopAgent(projectId, agentId);
+            set((s) => ({
+                agentStatuses: {
+                    ...s.agentStatuses,
+                    [agentId]: { status: "idle", lastSeen: new Date().toISOString() },
+                },
+            }));
+            return result;
+        } catch {
+            return null;
+        }
+    },
+
+    // Legacy compat
     createTeam: async (projectId, prompt, teamName = "chibi-team", model = "claude-sonnet-4-5-20250929") => {
         set({ loading: true });
         try {
@@ -85,7 +149,7 @@ const useAgentStore = create((set, get) => ({
             const data = await agentService.teamStatus(projectId);
             set({
                 agents: data.agents || [],
-                teamSessions: data.session || null,
+                teamConfig: data,  // { active, team_name, preset_id, agents, agent_count }
             });
             return data;
         } catch {

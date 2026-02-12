@@ -1,76 +1,28 @@
 /**
- * TeamPanel — prompt-based Claude Agent Teams UI.
+ * TeamPanel — Unified Agent Teams UI.
  *
- * Official architecture: user writes ONE natural language prompt,
- * Claude Code creates the team, spawns teammates, assigns roles.
- *
- * UI:
- * 1. Prompt textarea + quick presets
- * 2. Optional: team name & model
- * 3. Live output stream dashboard
+ * Uses the unified orchestrator backend:
+ * - Preset-based team creation (SDK subagents)
+ * - Custom prompt team creation
+ * - Per-agent status dashboard
+ * - Real-time updates via WebSocket (no polling)
  */
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
-    Input, Button, Typography, Flex, Select, Tag, Space, Tooltip, Collapse,
-    Tabs, Badge, Empty,
+    Input, Button, Typography, Flex, Select, Tag, Badge, message,
 } from "antd";
 import {
-    TeamOutlined, SendOutlined, ThunderboltOutlined, DeleteOutlined,
-    RocketOutlined, BugOutlined, SearchOutlined, CodeOutlined,
-    SettingOutlined, ClearOutlined, LoadingOutlined, ExperimentOutlined,
-    PlayCircleOutlined, StopOutlined, ExpandOutlined,
+    TeamOutlined, SendOutlined, ThunderboltOutlined,
+    SettingOutlined, LoadingOutlined,
+    PlayCircleOutlined, StopOutlined,
 } from "@ant-design/icons";
 import useAgentStore from "../../stores/useAgentStore";
 import useProjectStore from "../../stores/useProjectStore";
 
-const { Text, Title, Paragraph } = Typography;
+const { Text, Title } = Typography;
 const { TextArea } = Input;
 
-/* ─── Quick Presets ─────────────────────────────────────────────────── */
-
-const PRESETS = [
-    {
-        id: "fullstack",
-        label: "🚀 Full Stack",
-        icon: <RocketOutlined />,
-        color: "#6366f1",
-        prompt: `Create an agent team for full-stack development on this codebase.
-Spawn 3 teammates:
-- One backend specialist focused on API design, data models, and server logic
-- One frontend specialist focused on UI components, UX, and responsive design
-- One QA engineer focused on writing tests, verifying functionality, and quality
-Coordinate the team, break tasks into subtasks, and review completed work.`,
-    },
-    {
-        id: "review",
-        label: "🔍 Code Review",
-        icon: <SearchOutlined />,
-        color: "#10b981",
-        prompt: `Create an agent team to review this codebase in parallel. Spawn three reviewers:
-- One focused on security implications
-- One checking performance impact
-- One validating test coverage
-Have them each review independently and report findings. Synthesize a final summary.`,
-    },
-    {
-        id: "debug",
-        label: "🐛 Debug Squad",
-        icon: <BugOutlined />,
-        color: "#f59e0b",
-        prompt: `There seems to be an issue in this codebase. Spawn 3 agent teammates to investigate different hypotheses. Have them talk to each other to try to disprove each other's theories, like a scientific debate. Update findings with whatever consensus emerges.`,
-    },
-    {
-        id: "research",
-        label: "🔬 Research",
-        icon: <ExperimentOutlined />,
-        color: "#8b5cf6",
-        prompt: `Create an agent team to explore this codebase from different angles:
-- One teammate focused on architecture and design patterns
-- One focused on potential improvements and modernization
-- One playing devil's advocate, questioning decisions
-Synthesize findings into a comprehensive report.`,
-    },
-];
+/* ─── Constants ───────────────────────────────────────────────────── */
 
 const MODEL_OPTIONS = [
     { value: "claude-sonnet-4-5-20250929", label: "Claude Sonnet 4.5" },
@@ -78,72 +30,88 @@ const MODEL_OPTIONS = [
     { value: "claude-haiku-4-5-20250929", label: "Claude Haiku 4.5" },
 ];
 
-/* ─── Styles ───────────────────────────────────────────────────────── */
+const PRESET_COLORS = {
+    fullstack: "#6366f1",
+    review: "#10b981",
+    debug: "#f59e0b",
+    research: "#8b5cf6",
+};
+
+const ROLE_EMOJIS = {
+    lead: "\u{1F451}", backend: "\u{2699}\uFE0F", frontend: "\u{1F3A8}",
+    qa: "\u{1F9EA}", docs: "\u{1F4C4}", security: "\u{1F6E1}\uFE0F", custom: "\u{1F916}",
+};
+
+const STATUS_CONFIG = {
+    idle: { cssColor: "var(--text-tertiary)", label: "Idle" },
+    working: { cssColor: "var(--log-success)", label: "Working" },
+    reviewing: { cssColor: "var(--log-info)", label: "Reviewing" },
+    blocked: { cssColor: "var(--log-error)", label: "Blocked" },
+    stopped: { cssColor: "var(--text-muted)", label: "Stopped" },
+};
+
+/* ─── Styles ──────────────────────────────────────────────────────── */
 
 const sty = {
-    container: {
-        maxWidth: 860,
-        margin: "0 auto",
-    },
+    container: { maxWidth: 860, margin: "0 auto" },
     promptBox: {
-        background: "var(--bg-secondary)",
+        background: "var(--bg-container)",
         border: "1.5px solid var(--border-subtle)",
-        borderRadius: 16,
-        padding: 24,
+        borderRadius: 16, padding: 24,
     },
-    presetBtn: (color, isActive) => ({
-        background: isActive ? `${color}22` : "var(--bg-hover)",
+    presetCard: (color, isActive) => ({
+        background: isActive ? `${color}18` : "var(--bg-hover)",
         border: `1.5px solid ${isActive ? color : "var(--border-subtle)"}`,
-        borderRadius: 10,
-        padding: "8px 14px",
-        cursor: "pointer",
-        transition: "all 0.2s",
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        fontSize: 12,
-        fontWeight: 500,
-        color: isActive ? color : "inherit",
+        borderRadius: 12, padding: "12px 16px",
+        cursor: "pointer", transition: "all 0.2s",
+        flex: "1 1 180px", minWidth: 170,
+    }),
+    agentRow: {
+        display: "flex", alignItems: "center", gap: 10,
+        padding: "8px 12px", borderRadius: 8,
+        background: "var(--bg-surface)", marginBottom: 4,
+        border: "1px solid var(--border-subtle)",
+    },
+    statusDot: (cssColor) => ({
+        width: 8, height: 8, borderRadius: "50%",
+        background: cssColor,
     }),
     outputContainer: {
-        background: "#0d1117",
-        border: "1px solid rgba(255,255,255,0.08)",
-        borderRadius: 12,
-        padding: 16,
-        maxHeight: 400,
-        overflowY: "auto",
+        background: "var(--bg-terminal)",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: 12, padding: 16,
+        maxHeight: 350, overflowY: "auto",
         fontFamily: '"JetBrains Mono", "Fira Code", monospace',
-        fontSize: 12,
-        lineHeight: 1.7,
+        fontSize: 12, lineHeight: 1.7,
     },
-    outputLine: (type) => ({
-        color: type === "error" ? "#f87171"
-            : type === "teammate_event" ? "#34d399"
-                : "rgba(255,255,255,0.75)",
+    outputLine: (level) => ({
+        color: level === "error" ? "var(--log-error)"
+            : level === "success" ? "var(--log-success)"
+            : level === "tool" ? "var(--log-info)"
+            : "var(--text-secondary)",
         padding: "1px 0",
     }),
     settingsRow: {
-        background: "var(--bg-hover)",
-        borderRadius: 10,
-        padding: "12px 16px",
-        border: "1px solid var(--border-subtle)",
+        background: "var(--bg-surface)", borderRadius: 10,
+        padding: "12px 16px", border: "1px solid var(--border-subtle)",
     },
 };
 
-/* ─── Component ────────────────────────────────────────────────────── */
+/* ─── Component ───────────────────────────────────────────────────── */
 
 export default function TeamPanel() {
     const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
     const {
-        loading, teamConfig, teamSessions, teamOutput,
-        createTeam, fetchTeamStatus, cleanupTeam,
-        sendCommand, fetchTeamOutput, broadcastMessage,
+        loading, agents, teamConfig, presets, agentStatuses, teamOutput,
+        createTeamFromPreset, createTeamFromPrompt,
+        fetchTeamStatus, fetchPresets, dispatchTeam,
+        cleanupTeam, sendCommand,
     } = useAgentStore();
 
-    // ── State ────────────────────────────────────────────────────────
+    // ── Local State ──────────────────────────────────────────────────
     const [prompt, setPrompt] = useState("");
     const [teamName, setTeamName] = useState("chibi-team");
-    const [model, setModel] = useState("claude-sonnet-4-5-20250929");
+    const [model, setModel] = useState("");
     const [activePreset, setActivePreset] = useState(null);
     const [showSettings, setShowSettings] = useState(false);
     const [creating, setCreating] = useState(false);
@@ -151,7 +119,19 @@ export default function TeamPanel() {
     const [sending, setSending] = useState(false);
 
     const outputRef = useRef(null);
-    const pollRef = useRef(null);
+
+    // ── Effects ──────────────────────────────────────────────────────
+
+    // Fetch presets + team status on mount
+    useEffect(() => {
+        fetchPresets();
+    }, []);
+
+    useEffect(() => {
+        if (selectedProjectId) {
+            fetchTeamStatus(selectedProjectId);
+        }
+    }, [selectedProjectId]);
 
     // Auto-scroll output
     useEffect(() => {
@@ -160,44 +140,69 @@ export default function TeamPanel() {
         }
     }, [teamOutput]);
 
-    // Poll when team is active
-    const isTeamActive = teamSessions?.active;
-    useEffect(() => {
-        if (isTeamActive && selectedProjectId) {
-            const poll = () => {
-                fetchTeamStatus(selectedProjectId);
-                fetchTeamOutput(selectedProjectId, 50);
-            };
-            poll();
-            pollRef.current = setInterval(poll, 4000);
-            return () => clearInterval(pollRef.current);
+    // ── Derived State ────────────────────────────────────────────────
+    const isTeamActive = teamConfig?.active || agents.length > 0;
+    const canLaunch = activePreset || prompt.trim();
+
+    // ── Handlers ─────────────────────────────────────────────────────
+
+    const handlePresetClick = (preset) => {
+        if (activePreset === preset.id) {
+            setActivePreset(null);
+            setPrompt("");
+        } else {
+            setActivePreset(preset.id);
+            setPrompt(""); // Clear custom prompt when selecting preset
         }
-    }, [isTeamActive, selectedProjectId]);
-
-    // Check status on mount
-    useEffect(() => {
-        if (selectedProjectId) {
-            fetchTeamStatus(selectedProjectId);
-            fetchTeamOutput(selectedProjectId, 50);
-        }
-    }, [selectedProjectId]);
-
-    /* ── Handlers ───────────────────────────────────────────────────── */
-
-    const handlePreset = (preset) => {
-        setActivePreset(preset.id);
-        setPrompt(preset.prompt);
     };
 
     const handleCreate = async () => {
-        if (!selectedProjectId || !prompt.trim()) return;
+        if (!selectedProjectId) {
+            message.error("No project selected.");
+            return;
+        }
+        if (!canLaunch) {
+            message.warning("Select a preset or enter a custom prompt.");
+            return;
+        }
+
         setCreating(true);
         try {
-            await createTeam(selectedProjectId, prompt.trim(), teamName, model);
-            // Start polling
+            let result;
+            if (activePreset) {
+                // Preset-based: use structured backend presets
+                result = await createTeamFromPreset(selectedProjectId, activePreset, model);
+            } else {
+                // Custom prompt
+                result = await createTeamFromPrompt(selectedProjectId, prompt.trim(), teamName, model);
+            }
+
+            if (result?.error) {
+                message.error(`Team creation error: ${result.error}`, 5);
+            } else {
+                const count = result?.agents?.length || 0;
+                message.success(`Team created with ${count} agents!`);
+            }
             await fetchTeamStatus(selectedProjectId);
+        } catch (err) {
+            console.error("[TeamPanel] create failed:", err);
+            message.error(err?.message || "Failed to create team. Check backend logs.");
         } finally {
             setCreating(false);
+        }
+    };
+
+    const handleDispatch = async () => {
+        if (!selectedProjectId) return;
+        try {
+            const result = await dispatchTeam(selectedProjectId);
+            if (result?.count > 0) {
+                message.success(`Dispatched ${result.count} tasks`);
+            } else {
+                message.info("No tasks to dispatch. Create tasks first.");
+            }
+        } catch {
+            message.error("Failed to dispatch tasks.");
         }
     };
 
@@ -229,26 +234,35 @@ export default function TeamPanel() {
             e.preventDefault();
             if (isTeamActive) {
                 handleSendCommand();
-            } else if (prompt.trim()) {
+            } else if (canLaunch) {
                 handleCreate();
             }
         }
     };
 
-    /* ── Render ─────────────────────────────────────────────────────── */
+    // Get live status for an agent (WS updates override DB status)
+    const getAgentStatus = (agent) => {
+        const ws = agentStatuses[agent.id];
+        return ws?.status || agent.status || "idle";
+    };
+
+    /* ── Render ────────────────────────────────────────────────────── */
 
     return (
         <div className="animate-fade-in" style={sty.container}>
             {/* ── Header ─────────────────────────────────────── */}
             <div className="page-header" style={{ marginBottom: 24 }}>
                 <Flex align="center" gap={12}>
-                    <TeamOutlined style={{ fontSize: 22, color: "var(--accent-primary)" }} />
+                    <TeamOutlined style={{ fontSize: 22, color: "var(--log-info)" }} />
                     <div>
                         <Title level={4} style={{ margin: 0, fontSize: 18 }}>
                             Agent Teams
                         </Title>
                         <Text type="secondary" style={{ fontSize: 12 }}>
-                            Describe what you want — Claude creates the team
+                            {isTeamActive
+                                ? `${teamConfig?.team_name || "Team"} \u2014 ${agents.length} agents`
+                                : "Select a preset or describe your team"
+                            }
                         </Text>
                     </div>
                     <div style={{ flex: 1 }} />
@@ -263,70 +277,88 @@ export default function TeamPanel() {
                                 onClick={handleCleanup}
                                 loading={creating}
                             >
-                                Cleanup
+                                Disband
                             </Button>
                         </Flex>
                     )}
                 </Flex>
             </div>
 
-            {/* ── Team Creation / Prompt ──────────────────────── */}
+            {/* ── Team Creation ───────────────────────────────── */}
             {!isTeamActive && (
                 <div style={sty.promptBox}>
-                    {/* Quick Presets */}
+                    {/* Presets from backend */}
                     <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, letterSpacing: 0.5 }}>
-                        QUICK PRESETS
+                        TEAM PRESETS
                     </Text>
-                    <Flex gap={8} wrap="wrap" style={{ marginTop: 8, marginBottom: 16 }}>
-                        {PRESETS.map((p) => (
-                            <div
-                                key={p.id}
-                                style={sty.presetBtn(p.color, activePreset === p.id)}
-                                onClick={() => handlePreset(p)}
-                                onMouseEnter={(e) => {
-                                    e.currentTarget.style.borderColor = p.color;
-                                    e.currentTarget.style.opacity = "0.9";
-                                }}
-                                onMouseLeave={(e) => {
-                                    if (activePreset !== p.id) {
-                                        e.currentTarget.style.borderColor = "var(--border-subtle)";
-                                    }
-                                    e.currentTarget.style.opacity = "1";
-                                }}
-                            >
-                                {p.label}
-                            </div>
-                        ))}
+                    <Flex gap={10} wrap="wrap" style={{ marginTop: 8, marginBottom: 16 }}>
+                        {(presets || []).map((p) => {
+                            const color = PRESET_COLORS[p.id] || "#6366f1";
+                            const isActive = activePreset === p.id;
+                            return (
+                                <div
+                                    key={p.id}
+                                    style={sty.presetCard(color, isActive)}
+                                    onClick={() => handlePresetClick(p)}
+                                >
+                                    <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4, color: isActive ? color : "inherit" }}>
+                                        {p.icon} {p.name}
+                                    </div>
+                                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>
+                                        {p.description}
+                                    </div>
+                                    <Flex gap={4} wrap="wrap">
+                                        {(p.agents || []).map((a, i) => (
+                                            <Tag
+                                                key={i}
+                                                style={{
+                                                    fontSize: 10, padding: "0 6px", margin: 0,
+                                                    borderRadius: 4, border: "none",
+                                                    background: isActive ? `${color}22` : "var(--bg-tag)",
+                                                }}
+                                            >
+                                                {ROLE_EMOJIS[a.role] || ""} {a.name}
+                                            </Tag>
+                                        ))}
+                                    </Flex>
+                                </div>
+                            );
+                        })}
+                        {(!presets || presets.length === 0) && (
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                                Loading presets...
+                            </Text>
+                        )}
                     </Flex>
 
-                    {/* Main Prompt */}
+                    {/* Divider */}
+                    <Flex align="center" gap={8} style={{ margin: "8px 0 12px" }}>
+                        <div style={{ flex: 1, height: 1, background: "var(--border-subtle)" }} />
+                        <Text type="secondary" style={{ fontSize: 10 }}>OR CUSTOM PROMPT</Text>
+                        <div style={{ flex: 1, height: 1, background: "var(--border-subtle)" }} />
+                    </Flex>
+
+                    {/* Custom Prompt */}
                     <TextArea
                         value={prompt}
                         onChange={(e) => {
                             setPrompt(e.target.value);
-                            setActivePreset(null);
+                            if (e.target.value.trim()) setActivePreset(null);
                         }}
-                        placeholder={`Describe what you want the team to do...
-
-Example: "Create an agent team with 3 teammates to refactor the authentication module. One teammate on API endpoints, one on database schema, one on tests. Use Sonnet for each teammate."`}
-                        autoSize={{ minRows: 5, maxRows: 12 }}
+                        placeholder="Describe what you want the team to do..."
+                        autoSize={{ minRows: 3, maxRows: 10 }}
                         style={{
-                            background: "var(--bg-primary)",
+                            background: "var(--bg-input)",
                             border: "1.5px solid var(--border-subtle)",
-                            borderRadius: 12,
-                            fontSize: 13,
-                            lineHeight: 1.6,
+                            borderRadius: 12, fontSize: 13, lineHeight: 1.6,
                             padding: "12px 16px",
                             fontFamily: '"Inter", -apple-system, sans-serif',
                         }}
                         onKeyDown={handleKeyDown}
                     />
 
-                    {/* Settings Toggle */}
-                    <Flex
-                        align="center" justify="space-between"
-                        style={{ marginTop: 12 }}
-                    >
+                    {/* Settings */}
+                    <Flex align="center" justify="space-between" style={{ marginTop: 12 }}>
                         <Button
                             type="text" size="small"
                             icon={<SettingOutlined />}
@@ -336,11 +368,10 @@ Example: "Create an agent team with 3 teammates to refactor the authentication m
                             {showSettings ? "Hide" : "Settings"}
                         </Button>
                         <Text type="secondary" style={{ fontSize: 10 }}>
-                            ⌘+Enter to launch
+                            {"\u2318"}+Enter to launch
                         </Text>
                     </Flex>
 
-                    {/* Optional Settings */}
                     {showSettings && (
                         <div style={{ ...sty.settingsRow, marginTop: 8 }}>
                             <Flex gap={16} align="center" wrap="wrap">
@@ -353,11 +384,13 @@ Example: "Create an agent team with 3 teammates to refactor the authentication m
                                     />
                                 </div>
                                 <div>
-                                    <Text type="secondary" style={{ fontSize: 10 }}>Model</Text>
+                                    <Text type="secondary" style={{ fontSize: 10 }}>Lead Model</Text>
                                     <Select
-                                        size="small" value={model}
+                                        size="small" value={model || undefined}
                                         onChange={setModel}
                                         options={MODEL_OPTIONS}
+                                        placeholder="Default"
+                                        allowClear
                                         style={{ width: 180, marginTop: 2 }}
                                     />
                                 </div>
@@ -365,26 +398,27 @@ Example: "Create an agent team with 3 teammates to refactor the authentication m
                         </div>
                     )}
 
-                    {/* Launch Button */}
+                    {/* Launch */}
                     <Button
                         type="primary" size="large" block
                         icon={creating ? <LoadingOutlined /> : <ThunderboltOutlined />}
                         onClick={handleCreate}
                         loading={creating}
-                        disabled={!prompt.trim() || creating}
+                        disabled={!canLaunch || creating}
                         style={{
-                            marginTop: 16,
-                            height: 48,
-                            borderRadius: 12,
-                            fontSize: 15,
-                            fontWeight: 600,
-                            background: prompt.trim()
+                            marginTop: 16, height: 48, borderRadius: 12,
+                            fontSize: 15, fontWeight: 600,
+                            background: canLaunch
                                 ? "linear-gradient(135deg, #6366f1, #8b5cf6)"
                                 : undefined,
                             border: "none",
                         }}
                     >
-                        {creating ? "Launching Team..." : "Launch Agent Team"}
+                        {creating ? "Launching Team..." : (
+                            activePreset
+                                ? `Launch ${(presets || []).find(p => p.id === activePreset)?.name || "Team"}`
+                                : "Launch Agent Team"
+                        )}
                     </Button>
                 </div>
             )}
@@ -393,52 +427,109 @@ Example: "Create an agent team with 3 teammates to refactor the authentication m
             {isTeamActive && (
                 <div style={{ marginTop: 4 }}>
                     {/* Team Info Bar */}
-                    <div style={{
-                        ...sty.settingsRow,
-                        marginBottom: 16,
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 16,
-                    }}>
-                        <div>
-                            <Text type="secondary" style={{ fontSize: 10 }}>TEAM</Text>
-                            <div style={{ fontSize: 13, fontWeight: 600 }}>
-                                {teamSessions?.team || teamConfig?.team_name || "—"}
+                    <div style={{ ...sty.settingsRow, marginBottom: 16 }}>
+                        <Flex align="center" gap={16}>
+                            <div>
+                                <Text type="secondary" style={{ fontSize: 10 }}>TEAM</Text>
+                                <div style={{ fontSize: 13, fontWeight: 600 }}>
+                                    {teamConfig?.team_name || "Agent Team"}
+                                </div>
                             </div>
-                        </div>
-                        <div style={{
-                            width: 1, height: 28,
-                            background: "var(--border-subtle)",
-                        }} />
-                        <div>
-                            <Text type="secondary" style={{ fontSize: 10 }}>STATUS</Text>
-                            <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
-                                <div style={{
-                                    width: 7, height: 7,
-                                    borderRadius: "50%",
-                                    background: teamSessions?.running ? "#34d399" : "#6b7280",
-                                    boxShadow: teamSessions?.running
-                                        ? "0 0 6px rgba(52,211,153,0.5)" : "none",
-                                }} />
-                                {teamSessions?.running ? "Running" : "Stopped"}
+                            {teamConfig?.preset_id && (
+                                <>
+                                    <div style={{ width: 1, height: 28, background: "var(--border-subtle)" }} />
+                                    <div>
+                                        <Text type="secondary" style={{ fontSize: 10 }}>PRESET</Text>
+                                        <div style={{ fontSize: 13 }}>
+                                            {teamConfig.preset_id}
+                                        </div>
+                                    </div>
+                                </>
+                            )}
+                            <div style={{ width: 1, height: 28, background: "var(--border-subtle)" }} />
+                            <div>
+                                <Text type="secondary" style={{ fontSize: 10 }}>AGENTS</Text>
+                                <div style={{ fontSize: 13 }}>
+                                    {agents.length}
+                                </div>
                             </div>
-                        </div>
-                        <div style={{
-                            width: 1, height: 28,
-                            background: "var(--border-subtle)",
-                        }} />
-                        <div>
-                            <Text type="secondary" style={{ fontSize: 10 }}>PID</Text>
-                            <div style={{
-                                fontSize: 12,
-                                fontFamily: '"JetBrains Mono", monospace',
-                            }}>
-                                {teamSessions?.lead?.pid || "—"}
-                            </div>
-                        </div>
+                        </Flex>
                     </div>
 
-                    {/* Live Output */}
+                    {/* Agents List */}
+                    <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, letterSpacing: 0.5 }}>
+                        AGENTS
+                    </Text>
+                    <div style={{ marginTop: 8, marginBottom: 16 }}>
+                        {agents.map((agent) => {
+                            const status = getAgentStatus(agent);
+                            const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.idle;
+                            return (
+                                <div key={agent.id} style={sty.agentRow}>
+                                    <span style={{ fontSize: 16, width: 24, textAlign: "center" }}>
+                                        {ROLE_EMOJIS[agent.role] || ROLE_EMOJIS.custom}
+                                    </span>
+                                    <div style={{ flex: 1 }}>
+                                        <div style={{ fontSize: 13, fontWeight: 500 }}>
+                                            {agent.name}
+                                            {agent.is_lead && (
+                                                <Tag
+                                                    color="purple"
+                                                    style={{
+                                                        fontSize: 9, padding: "0 6px", marginLeft: 6,
+                                                        borderRadius: 4, lineHeight: "18px",
+                                                    }}
+                                                >
+                                                    LEAD
+                                                </Tag>
+                                            )}
+                                        </div>
+                                        {agent.sdk_agent_key && (
+                                            <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                                                {agent.sdk_agent_key}
+                                            </div>
+                                        )}
+                                    </div>
+                                    <Flex align="center" gap={6}>
+                                        <div style={sty.statusDot(cfg.cssColor)} />
+                                        <Text style={{ fontSize: 11, color: cfg.cssColor }}>
+                                            {cfg.label}
+                                        </Text>
+                                    </Flex>
+                                </div>
+                            );
+                        })}
+                        {agents.length === 0 && (
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                                No agents created yet.
+                            </Text>
+                        )}
+                    </div>
+
+                    {/* Action Buttons */}
+                    <Flex gap={8} wrap="wrap" style={{ marginBottom: 16 }}>
+                        <Button
+                            type="primary" size="small"
+                            icon={<ThunderboltOutlined />}
+                            onClick={handleDispatch}
+                        >
+                            Dispatch Tasks
+                        </Button>
+                        <Button
+                            size="small"
+                            onClick={() => sendCommand(selectedProjectId, "What's the status of each teammate?")}
+                        >
+                            Check Status
+                        </Button>
+                        <Button
+                            size="small"
+                            onClick={() => fetchTeamStatus(selectedProjectId)}
+                        >
+                            Refresh
+                        </Button>
+                    </Flex>
+
+                    {/* Live Output (from WS logs) */}
                     <div style={{ marginBottom: 12 }}>
                         <Flex align="center" justify="space-between" style={{ marginBottom: 8 }}>
                             <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, letterSpacing: 0.5 }}>
@@ -446,25 +537,29 @@ Example: "Create an agent team with 3 teammates to refactor the authentication m
                             </Text>
                             <Badge
                                 count={teamOutput?.length || 0}
-                                showZero
-                                size="small"
-                                style={{ backgroundColor: "var(--accent-primary)" }}
+                                showZero size="small"
+                                style={{ backgroundColor: "var(--log-info)" }}
                             />
                         </Flex>
                         <div ref={outputRef} style={sty.outputContainer}>
                             {(!teamOutput || teamOutput.length === 0) ? (
-                                <div style={{ color: "rgba(255,255,255,0.3)", textAlign: "center", padding: 40 }}>
+                                <div style={{ color: "var(--text-muted)", textAlign: "center", padding: 40 }}>
                                     Waiting for output...
                                 </div>
                             ) : (
                                 teamOutput.map((line, i) => (
-                                    <div key={i} style={sty.outputLine(line.teammate_event ? "teammate_event" : line.type)}>
-                                        <span style={{ color: "rgba(255,255,255,0.25)", marginRight: 8 }}>
-                                            {new Date(line.timestamp).toLocaleTimeString("en", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                                    <div key={i} style={sty.outputLine(line.level)}>
+                                        <span style={{ color: "var(--time-stamp)", marginRight: 8 }}>
+                                            {line.ts ? new Date(line.ts).toLocaleTimeString("en", {
+                                                hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit",
+                                            }) : ""}
                                         </span>
-                                        {typeof line.content === "string"
-                                            ? line.content
-                                            : JSON.stringify(line.content)}
+                                        {line.agent_id != null && (
+                                            <span style={{ color: "var(--agent-tag)", marginRight: 6 }}>
+                                                [{agents.find(a => a.id === line.agent_id)?.name || `agent-${line.agent_id}`}]
+                                            </span>
+                                        )}
+                                        {line.message || ""}
                                     </div>
                                 ))
                             )}
@@ -476,15 +571,13 @@ Example: "Create an agent team with 3 teammates to refactor the authentication m
                         <TextArea
                             value={commandText}
                             onChange={(e) => setCommandText(e.target.value)}
-                            placeholder="Send a command to the lead agent... (⌘+Enter)"
+                            placeholder={"Send a command to the lead agent... (\u2318+Enter)"}
                             autoSize={{ minRows: 2, maxRows: 5 }}
                             onKeyDown={handleKeyDown}
                             style={{
-                                flex: 1,
-                                background: "var(--bg-secondary)",
+                                flex: 1, background: "var(--bg-input)",
                                 border: "1.5px solid var(--border-subtle)",
-                                borderRadius: 10,
-                                fontSize: 13,
+                                borderRadius: 10, fontSize: 13,
                             }}
                         />
                         <Button
@@ -493,53 +586,17 @@ Example: "Create an agent team with 3 teammates to refactor the authentication m
                             onClick={handleSendCommand}
                             loading={sending}
                             disabled={!commandText.trim()}
-                            style={{
-                                height: "auto",
-                                borderRadius: 10,
-                                minWidth: 48,
-                            }}
+                            style={{ height: "auto", borderRadius: 10, minWidth: 48 }}
                         />
-                    </Flex>
-
-                    {/* Quick Actions */}
-                    <Flex gap={6} wrap="wrap" style={{ marginTop: 12 }}>
-                        {[
-                            { label: "Check status", cmd: "What's the status of each teammate?" },
-                            { label: "Show tasks", cmd: "Show the current task list" },
-                            { label: "Clean up", cmd: "Clean up the team", danger: true },
-                        ].map((action) => (
-                            <Button
-                                key={action.label}
-                                size="small"
-                                type="text"
-                                danger={action.danger}
-                                onClick={async () => {
-                                    if (action.danger) {
-                                        handleCleanup();
-                                    } else {
-                                        await sendCommand(selectedProjectId, action.cmd);
-                                    }
-                                }}
-                                style={{ fontSize: 11, borderRadius: 6 }}
-                            >
-                                {action.label}
-                            </Button>
-                        ))}
                     </Flex>
                 </div>
             )}
 
-            {/* ── Empty State ────────────────────────────────── */}
-            {!isTeamActive && !prompt && (
-                <div style={{
-                    marginTop: 32,
-                    textAlign: "center",
-                    padding: "24px 0",
-                }}>
+            {/* ── Empty State ─────────────────────────────────── */}
+            {!isTeamActive && !activePreset && !prompt && (
+                <div style={{ marginTop: 32, textAlign: "center", padding: "24px 0" }}>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                        Write a prompt or pick a preset to launch an agent team.
-                        <br />
-                        Claude will create teammates, assign roles, and coordinate the work.
+                        Pick a team preset or write a custom prompt to get started.
                     </Text>
                 </div>
             )}

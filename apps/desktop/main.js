@@ -11,6 +11,17 @@ const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const path = require("path");
 const { spawn } = require("child_process");
 
+/* ─── GPU & WebGPU acceleration flags ───────────────────────────────
+ * Must be set BEFORE app.whenReady().
+ * Electron 35 (Chromium 134) supports WebGPU natively.
+ */
+app.commandLine.appendSwitch("enable-gpu-rasterization");
+app.commandLine.appendSwitch("enable-zero-copy");
+app.commandLine.appendSwitch("ignore-gpu-blocklist");
+app.commandLine.appendSwitch("enable-features", "WebGPU,Vulkan,CanvasOopRasterization");
+app.commandLine.appendSwitch("enable-unsafe-webgpu");   // allow WebGPU without origin trial
+app.commandLine.appendSwitch("use-angle", "metal");      // macOS: Metal backend for WebGL (faster)
+
 let mainWindow = null;
 let backendProcess = null;
 

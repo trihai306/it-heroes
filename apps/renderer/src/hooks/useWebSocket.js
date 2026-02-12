@@ -18,6 +18,7 @@ export default function useWebSocket(projectId) {
     const [logs, setLogs] = useState([]);
 
     const updateAgentStatus = useAgentStore((s) => s.updateAgentStatus);
+    const fetchAgents = useAgentStore((s) => s.fetchAgents);
     const handleTaskEvent = useTaskStore((s) => s.handleTaskEvent);
 
     const addLog = useCallback((log) => {
@@ -67,6 +68,69 @@ export default function useWebSocket(projectId) {
                                 message: `QA: ${msg.data.message}`,
                             });
                             break;
+                        case "tool.execution":
+                            addLog({
+                                ts: msg.ts,
+                                level: msg.data.is_error ? "error" : "tool",
+                                agent_id: msg.data.agent_id,
+                                message: msg.data.content,
+                                tool: msg.data.raw?.tool,
+                                event_type: msg.data.event_type,
+                            });
+                            break;
+                        case "session.result":
+                            addLog({
+                                ts: msg.ts,
+                                level: msg.data.is_error ? "error" : "success",
+                                agent_id: msg.data.agent_id,
+                                message: `Session done: ${msg.data.num_turns} turns, ${msg.data.duration_ms}ms` +
+                                    (msg.data.total_cost_usd ? `, $${msg.data.total_cost_usd.toFixed(4)}` : ""),
+                            });
+                            break;
+                        case "team.created":
+                            addLog({
+                                ts: msg.ts,
+                                level: "success",
+                                message: `Team created: ${msg.data.team_name} (${msg.data.agents?.length || 0} agents)`,
+                            });
+                            // Refresh agent list to get all new agents
+                            if (projectId) fetchAgents(projectId);
+                            break;
+                        case "team.agent_spawned":
+                            addLog({
+                                ts: msg.ts,
+                                level: "info",
+                                agent_id: msg.data.id,
+                                message: `Agent spawned: ${msg.data.name} (${msg.data.role})`,
+                            });
+                            if (projectId) fetchAgents(projectId);
+                            break;
+                        case "team.agent_completed":
+                            updateAgentStatus(msg.data.agent_id, "idle");
+                            addLog({
+                                ts: msg.ts,
+                                level: "success",
+                                agent_id: msg.data.agent_id,
+                                message: `Agent completed: ${msg.data.name || `agent-${msg.data.agent_id}`}`,
+                            });
+                            break;
+                        case "team.task_delegated":
+                            updateAgentStatus(msg.data.to_agent_id, "working");
+                            addLog({
+                                ts: msg.ts,
+                                level: "info",
+                                agent_id: msg.data.to_agent_id,
+                                message: `Task delegated to ${msg.data.to_agent_name}: ${msg.data.description}`,
+                            });
+                            break;
+                        case "team.message":
+                            addLog({
+                                ts: msg.ts,
+                                level: "info",
+                                agent_id: msg.data.agent_id,
+                                message: msg.data.message,
+                            });
+                            break;
                         case "connected":
                             addLog({
                                 ts: new Date().toISOString(),
@@ -107,7 +171,7 @@ export default function useWebSocket(projectId) {
             }
             setConnected(false);
         };
-    }, [projectId, updateAgentStatus, handleTaskEvent, addLog]);
+    }, [projectId, updateAgentStatus, fetchAgents, handleTaskEvent, addLog]);
 
     return { connected, logs, clearLogs: () => setLogs([]) };
 }

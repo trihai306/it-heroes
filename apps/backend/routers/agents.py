@@ -38,11 +38,6 @@ class TeamConfig(BaseModel):
     agents: list[AgentCreate]
 
 
-def _get_simulation():
-    """Lazy import simulation singleton to avoid circular imports."""
-    from main import simulation
-    return simulation
-
 
 # ─── Endpoints ─────────────────────────────────────────────────────────
 
@@ -73,13 +68,6 @@ def create_team(
     for a in created:
         db.refresh(a)
 
-    # Initialize simulation for new team
-    sim = _get_simulation()
-    sim.init_agents(
-        [{"id": a.id, "role": a.role, "status": "idle"} for a in created],
-        project_id,
-    )
-
     return [_to_response(a) for a in created]
 
 
@@ -88,22 +76,8 @@ def list_agents(project_id: int, db: Session = Depends(get_session)):
     """List all agents for a project."""
     agents = db.exec(select(Agent).where(Agent.project_id == project_id)).all()
 
-    # Auto-init simulation if agents exist but simulation is empty
-    sim = _get_simulation()
-    if agents and not sim.agents:
-        sim.init_agents(
-            [{"id": a.id, "role": a.role, "status": "idle"} for a in agents],
-            project_id,
-        )
-
     return [_to_response(a) for a in agents]
 
-
-@router.get("/projects/{project_id}/agents/positions")
-def get_agent_positions(project_id: int):
-    """Get current chibi positions from simulation engine."""
-    sim = _get_simulation()
-    return {"positions": sim.get_all_positions()}
 
 
 @router.get("/agents/{agent_id}", response_model=AgentResponse)
@@ -122,10 +96,6 @@ def disband_team(project_id: int, db: Session = Depends(get_session)):
     for agent in agents:
         db.delete(agent)
     db.commit()
-
-    # Clear simulation
-    sim = _get_simulation()
-    sim.clear()
 
 
 def _to_response(agent: Agent) -> AgentResponse:

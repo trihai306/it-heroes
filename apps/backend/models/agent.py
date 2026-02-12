@@ -38,3 +38,7 @@ class Agent(SQLModel, table=True):
     team_name: Optional[str] = Field(default=None)
     is_lead: bool = Field(default=False)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Unified team tracking
+    parent_agent_id: Optional[int] = Field(default=None, foreign_key="agents.id")
+    sdk_agent_key: Optional[str] = Field(default=None)
+    orchestration_mode: str = Field(default="sdk")  # "sdk" | "cli" | "direct-api"

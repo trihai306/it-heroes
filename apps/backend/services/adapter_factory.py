@@ -1,9 +1,10 @@
 """Adapter Factory — selects the right Claude adapter based on configuration.
 
 Modes:
-  - "sdk":  Always use Anthropic SDK (requires OAuth token or API key)
-  - "cli":  Always use Claude CLI subprocess (requires `claude` binary)
-  - "auto": Try SDK first (if any auth token found), fallback to CLI
+  - "agent-sdk": Use Claude Agent SDK (requires `claude-agent-sdk` + CLI)
+  - "sdk":       Use Anthropic SDK direct API (requires OAuth token or API key)
+  - "cli":       Use Claude CLI subprocess (requires `claude` binary)
+  - "auto":      Try Agent SDK → Anthropic SDK → CLI (in priority order)
 """
 
 import logging
@@ -14,21 +15,40 @@ from services.auth import get_auth_token
 logger = logging.getLogger(__name__)
 
 
+def _is_agent_sdk_available() -> bool:
+    """Check if claude-agent-sdk package is installed."""
+    try:
+        import claude_agent_sdk  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def create_adapter(mode: str = "auto"):
     """
     Create the appropriate Claude adapter based on mode.
 
-    Auth token sources (checked in order):
-    1. CLAUDE_CODE_OAUTH_TOKEN env var (from `claude /login`)
-    2. ANTHROPIC_AUTH_TOKEN env var (enterprise)
-    3. macOS Keychain (after `claude /login`)
-    4. ~/.claude/.credentials.json
-    5. ANTHROPIC_API_KEY env var (direct API billing)
+    Priority in "auto" mode:
+    1. Agent SDK (if claude-agent-sdk is installed + CLI available)
+    2. Anthropic SDK (if auth token found)
+    3. Claude CLI subprocess (fallback)
 
     Returns:
-        An instance of AnthropicSDKAdapter or ClaudeCodeAdapter
+        An instance of ClaudeAgentSDKAdapter, AnthropicSDKAdapter, or ClaudeCodeAdapter
     """
-    if mode == "sdk":
+    if mode == "agent-sdk":
+        from services.agent_sdk_adapter import ClaudeAgentSDKAdapter
+
+        adapter = ClaudeAgentSDKAdapter()
+        if not _is_agent_sdk_available():
+            logger.warning(
+                "agent-sdk mode requested but claude-agent-sdk not installed. "
+                "Install with: pip install claude-agent-sdk"
+            )
+        logger.info("🚀 Using Claude Agent SDK adapter")
+        return adapter
+
+    elif mode == "sdk":
         from services.anthropic_adapter import AnthropicSDKAdapter
 
         adapter = AnthropicSDKAdapter()
@@ -48,7 +68,17 @@ def create_adapter(mode: str = "auto"):
         return adapter
 
     else:  # "auto"
-        # Prefer SDK if any auth token is available (OAuth or API key)
+        # 1. Prefer Agent SDK if package is available
+        if _is_agent_sdk_available():
+            from services.agent_sdk_adapter import ClaudeAgentSDKAdapter
+
+            adapter = ClaudeAgentSDKAdapter()
+            logger.info(
+                "🚀 Auto-selected: Claude Agent SDK adapter (package found)"
+            )
+            return adapter
+
+        # 2. Fallback to Anthropic SDK if auth token available
         auth_token = get_auth_token()
         if auth_token:
             from services.anthropic_adapter import AnthropicSDKAdapter
@@ -58,13 +88,13 @@ def create_adapter(mode: str = "auto"):
                 "🧠 Auto-selected: Anthropic SDK adapter (auth token found)"
             )
             return adapter
-        else:
-            from services.claude_adapter import ClaudeCodeAdapter
 
-            adapter = ClaudeCodeAdapter()
-            logger.info(
-                "⌨️  Auto-selected: Claude CLI adapter "
-                "(no auth token, run `claude /login` to enable SDK mode)"
-            )
-            return adapter
+        # 3. Fallback to CLI
+        from services.claude_adapter import ClaudeCodeAdapter
 
+        adapter = ClaudeCodeAdapter()
+        logger.info(
+            "⌨️  Auto-selected: Claude CLI adapter "
+            "(no agent-sdk/auth token, run `claude /login` to enable SDK mode)"
+        )
+        return adapter

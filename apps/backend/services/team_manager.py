@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 from datetime import datetime, timezone
 from pathlib import Path
@@ -108,6 +109,16 @@ class TeamManager:
         """
         if self._lead and self._lead.is_running:
             await self.cleanup_team()
+
+        # Validate CLI exists
+        resolved_cli = shutil.which(self.cli_path)
+        if not resolved_cli:
+            error_msg = (
+                f"Claude CLI not found at '{self.cli_path}'. "
+                "Install Claude Code CLI: npm install -g @anthropic-ai/claude-code"
+            )
+            logger.error(f"❌ {error_msg}")
+            return {"error": error_msg}
 
         self._active_team = team_name
         self._project_id = project_id
