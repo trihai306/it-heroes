@@ -28,14 +28,24 @@ const TILE = 32;
 const MAP_W = 30;
 const MAP_H = 20;
 const SPRITE_W = 32;
-const SPRITE_H = 48;
-const CHAR_SHEET = "/sprites/characters.png";
-const TILE_SHEET = "/sprites/office_tiles.png";
+const SPRITE_H = 32;
 
-/* ── Sprite sheet layout: 6 columns × 6 rows ───────────────── */
-/* Col: 0=front, 1=front-walk, 2=back, 3=back-walk, 4=side, 5=working */
-/* Row: 0=lead, 1=backend, 2=frontend, 3=qa, 4=docs, 5=security       */
-const ROLE_ROW = { lead: 0, backend: 1, frontend: 2, qa: 3, docs: 4, security: 5, custom: 1 };
+/* ── PIPOYA sprite sheet: per-role, 3 cols × 4 rows (32×32 cells) ── */
+/* Rows: 0=down, 1=left, 2=right, 3=up                               */
+/* Cols: 3 walk-cycle frames (0,1,2) — frame 1 is idle/standing       */
+const ROLE_SHEETS = {
+    lead: "/sprites/chars/lead.png",
+    backend: "/sprites/chars/backend.png",
+    frontend: "/sprites/chars/frontend.png",
+    qa: "/sprites/chars/qa.png",
+    docs: "/sprites/chars/docs.png",
+    security: "/sprites/chars/security.png",
+    custom: "/sprites/chars/custom.png",
+};
+const SHEET_COLS = 3;
+const SHEET_ROWS = 4;
+const CELL_W = 32;
+const CELL_H = 32;
 
 /* Department zone configs */
 const DEPT_CONFIG = {
@@ -559,79 +569,87 @@ function useAgentMovement(agents, agentStatuses) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   SPRITE-BASED CHARACTER COMPONENT
+   SPRITE-BASED CHARACTER COMPONENT (PIPOYA)
    ═══════════════════════════════════════════════════════════════ */
+/* Preload sprite images for each role */
+const spriteImageCache = {};
+function getSpriteImage(role) {
+    const key = role || "custom";
+    if (spriteImageCache[key]) return spriteImageCache[key];
+    const src = ROLE_SHEETS[key] || ROLE_SHEETS.custom;
+    const img = new Image();
+    img.src = src;
+    spriteImageCache[key] = img;
+    return img;
+}
+
+/* Direction → row mapping for PIPOYA sheets */
+const DIR_ROW = { down: 0, left: 1, right: 2, up: 3 };
+
 function PixelCharSprite({ role, state, status }) {
     const canvasRef = useRef(null);
-    const imgRef = useRef(null);
     const [loaded, setLoaded] = useState(false);
+    const imgRef = useRef(null);
 
-    // Load sprite sheet once
+    const normRole = role && ROLE_SHEETS[role] ? role : "custom";
+
+    // Load sprite sheet for this role
     useEffect(() => {
-        const img = new Image();
-        img.src = CHAR_SHEET;
-        img.onload = () => {
-            imgRef.current = img;
+        const img = getSpriteImage(normRole);
+        imgRef.current = img;
+        if (img.complete) {
             setLoaded(true);
-        };
-    }, []);
+        } else {
+            img.onload = () => setLoaded(true);
+        }
+    }, [normRole]);
 
-    // Determine which sprite frame to draw
     const action = state?.action || "sitting";
     const facing = state?.facing || "down";
     const frame = state?.frame || 0;
 
+    // Render scale (1.5× for better visibility on the map)
+    const DRAW_SCALE = 1.5;
+    const drawW = CELL_W * DRAW_SCALE;
+    const drawH = CELL_H * DRAW_SCALE;
+
     useEffect(() => {
         const canvas = canvasRef.current;
         const img = imgRef.current;
-        if (!canvas || !img || !loaded) return;
+        if (!canvas || !img || !loaded || !img.complete) return;
 
         const ctx = canvas.getContext("2d");
-        ctx.clearRect(0, 0, SPRITE_W, SPRITE_H);
+        ctx.clearRect(0, 0, drawW, drawH);
 
-        const row = ROLE_ROW[role] ?? ROLE_ROW.custom;
+        // Determine row from facing direction
+        const row = DIR_ROW[facing] ?? 0;
 
-        // Determine column based on action/facing
+        // Determine column (walk frame)
         let col;
-        if (action === "sitting" && status === "in_progress") {
-            col = 5; // working
-        } else if (action === "walking" || action === "returning") {
-            // Alternate between walk frames
-            col = frame % 2 === 0 ? 0 : 1;
-            if (facing === "up") col = frame % 2 === 0 ? 2 : 3;
-            if (facing === "left" || facing === "right") col = 4;
+        if (action === "walking" || action === "returning") {
+            // Walk cycle: 0 → 1 → 2 → 1 → 0 → ...
+            const cycle = [0, 1, 2, 1];
+            col = cycle[frame % 4];
         } else {
-            col = 0; // front idle
+            // Idle/sitting: use middle frame (standing pose)
+            col = 1;
         }
 
-        // Sprite sheet: 6 cols × 6 rows, each cell ~100px
-        const cellW = img.width / 6;
-        const cellH = img.height / 6;
-        const sx = col * cellW;
-        const sy = row * cellH;
+        const sx = col * CELL_W;
+        const sy = row * CELL_H;
 
-        // Draw character from sprite sheet
-        ctx.save();
-        if (facing === "right") {
-            // Flip horizontally for right-facing
-        }
-        ctx.drawImage(img, sx, sy, cellW, cellH, 0, 0, SPRITE_W, SPRITE_H);
-
-        // If walking, add a bounce
-        if ((action === "walking" || action === "returning") && frame % 4 < 2) {
-            // Slight vertical offset already handled by position
-        }
-        ctx.restore();
-    }, [role, action, facing, frame, status, loaded]);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(img, sx, sy, CELL_W, CELL_H, 0, 0, drawW, drawH);
+    }, [normRole, action, facing, frame, status, loaded, drawW, drawH]);
 
     return (
         <canvas
             ref={canvasRef}
-            width={SPRITE_W}
-            height={SPRITE_H}
+            width={drawW}
+            height={drawH}
             style={{
-                width: SPRITE_W,
-                height: SPRITE_H,
+                width: drawW,
+                height: drawH,
                 imageRendering: "pixelated",
             }}
         />
@@ -706,18 +724,6 @@ export default function PixelOffice() {
 
     const getStatus = (id) => agentStatuses[id]?.status || "idle";
     const getTask = (id) => tasks.find((t) => t.assigned_agent_id === id && t.status !== "done");
-
-    if (agents.length === 0) {
-        return (
-            <div className="pixel-office" style={{ alignItems: "center", justifyContent: "center" }}>
-                <div className="pixel-empty">
-                    <span className="pixel-empty-icon">🏢</span>
-                    <span className="pixel-empty-text">No agents in the office</span>
-                    <span className="pixel-empty-sub">Create a team from the Team page first</span>
-                </div>
-            </div>
-        );
-    }
 
     return (
         <div className="pixel-office">
@@ -867,6 +873,40 @@ export default function PixelOffice() {
                                 </div>
                             );
                         })}
+
+                        {/* Empty state hint (floating over the office) */}
+                        {agents.length === 0 && (
+                            <div style={{
+                                position: "absolute", inset: 0,
+                                display: "flex", alignItems: "center", justifyContent: "center",
+                                pointerEvents: "none",
+                            }}>
+                                <div style={{
+                                    background: "rgba(26,27,46,0.88)",
+                                    backdropFilter: "blur(8px)",
+                                    borderRadius: 16,
+                                    padding: "28px 40px",
+                                    textAlign: "center",
+                                    border: "1px solid rgba(255,255,255,0.1)",
+                                    boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
+                                }}>
+                                    <div style={{ fontSize: 36, marginBottom: 8 }}>🏢</div>
+                                    <div style={{
+                                        fontFamily: '"JetBrains Mono", monospace',
+                                        fontSize: 14, fontWeight: 700,
+                                        color: "rgba(255,255,255,0.7)", marginBottom: 6,
+                                    }}>
+                                        Office is empty
+                                    </div>
+                                    <div style={{
+                                        fontFamily: '"JetBrains Mono", monospace',
+                                        fontSize: 11, color: "rgba(255,255,255,0.4)",
+                                    }}>
+                                        Create a team from the Team page
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             </div>
