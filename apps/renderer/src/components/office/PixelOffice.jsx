@@ -47,6 +47,26 @@ const SHEET_ROWS = 4;
 const CELL_W = 32;
 const CELL_H = 32;
 
+/* ── Normalize agent role names to canonical keys ─────────────── */
+/* e.g. "backend-dev" → "backend", "qa-engineer" → "qa"          */
+const ROLE_ALIASES = {
+    "backend-dev": "backend", "backend-developer": "backend", "backend_dev": "backend",
+    "frontend-dev": "frontend", "frontend-developer": "frontend", "frontend_dev": "frontend",
+    "qa-engineer": "qa", "qa-tester": "qa", "qa_engineer": "qa", "tester": "qa",
+    "lead-agent": "lead", "manager": "lead", "tech-lead": "lead",
+    "docs-writer": "docs", "documentation": "docs", "technical-writer": "docs",
+    "security-engineer": "security", "security-analyst": "security", "devops": "security",
+};
+function normalizeRole(role) {
+    if (!role) return "custom";
+    if (ROLE_SHEETS[role]) return role;
+    if (ROLE_ALIASES[role]) return ROLE_ALIASES[role];
+    // Try prefix match: "backend-xxx" → "backend"
+    const prefix = role.split("-")[0].split("_")[0];
+    if (ROLE_SHEETS[prefix]) return prefix;
+    return "custom";
+}
+
 /* Department zone configs */
 const DEPT_CONFIG = {
     lead: { color: "#fbbf24", bg: "rgba(251,191,36,0.06)", emoji: "👑", label: "Management" },
@@ -425,11 +445,11 @@ function drawPrinter(ctx, x, y) {
 function getDeskPosition(agents, agentId) {
     const agent = agents.find((a) => a.id === agentId);
     if (!agent) return null;
-    const role = agent.role || "custom";
+    const role = normalizeRole(agent.role);
     const zone = DEPT_ZONES[role];
     if (!zone) return { x: 15 * TILE, y: 18 * TILE };
 
-    const roleAgents = agents.filter((a) => a.role === role);
+    const roleAgents = agents.filter((a) => normalizeRole(a.role) === role);
     const idx = roleAgents.findIndex((a) => a.id === agentId);
     const desksPerRow = Math.floor(zone.w / 3);
     const row = Math.floor(idx / desksPerRow);
@@ -591,17 +611,30 @@ function PixelCharSprite({ role, state, status }) {
     const [loaded, setLoaded] = useState(false);
     const imgRef = useRef(null);
 
-    const normRole = role && ROLE_SHEETS[role] ? role : "custom";
+    const normRole = normalizeRole(role);
 
     // Load sprite sheet for this role
     useEffect(() => {
         const img = getSpriteImage(normRole);
         imgRef.current = img;
-        if (img.complete) {
+        if (img.complete && img.naturalWidth > 0) {
             setLoaded(true);
-        } else {
-            img.onload = () => setLoaded(true);
+            return;
         }
+        // Use addEventListener to avoid overwriting other components' onload
+        const handleLoad = () => setLoaded(true);
+        img.addEventListener("load", handleLoad);
+        // Fallback: poll for completion (handles race conditions)
+        const checkInterval = setInterval(() => {
+            if (img.complete && img.naturalWidth > 0) {
+                setLoaded(true);
+                clearInterval(checkInterval);
+            }
+        }, 100);
+        return () => {
+            img.removeEventListener("load", handleLoad);
+            clearInterval(checkInterval);
+        };
     }, [normRole]);
 
     const action = state?.action || "sitting";
@@ -691,7 +724,7 @@ export default function PixelOffice() {
     const zoneLabels = useMemo(() => {
         return Object.entries(DEPT_ZONES).map(([role, zone]) => {
             const cfg = DEPT_CONFIG[role] || DEPT_CONFIG.custom;
-            const count = agents.filter((a) => a.role === role).length;
+            const count = agents.filter((a) => normalizeRole(a.role) === role).length;
             return { role, zone, cfg, count };
         });
     }, [agents]);
