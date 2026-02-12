@@ -40,7 +40,6 @@ class Agent(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     # Unified team tracking
     parent_agent_id: Optional[int] = Field(default=None, foreign_key="agents.id")
-    sdk_agent_key: Optional[str] = Field(default=None)
     orchestration_mode: str = Field(default="cli")  # "cli" (Agent Teams)
     # CLI Agent Teams fields
     cli_agent_id: Optional[str] = Field(default=None)  # e.g. "dev-engineer@team-name"

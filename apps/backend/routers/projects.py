@@ -94,3 +94,18 @@ def get_project(project_id: int, db: Session = Depends(get_session)):
         description=project.description,
         created_at=project.created_at,
     )
+
+
+@router.delete("/{project_id}", status_code=204)
+async def delete_project(project_id: int, db: Session = Depends(get_session)):
+    """Delete a project and clean up all associated teams/agents."""
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    # Clean up active team (stop processes, file watchers, remove agents/sessions)
+    from main import unified_orchestrator
+    await unified_orchestrator.cleanup_team(db, project_id)
+
+    db.delete(project)
+    db.commit()

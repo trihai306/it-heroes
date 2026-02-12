@@ -32,6 +32,10 @@ class AgentResponse(BaseModel):
     team_name: str | None = None
     is_lead: bool = False
     created_at: datetime
+    cli_agent_id: str | None = None
+    agent_color: str | None = None
+    parent_agent_id: int | None = None
+    orchestration_mode: str = "cli"
 
 
 class TeamConfig(BaseModel):
@@ -80,12 +84,12 @@ def list_agents(project_id: int, db: Session = Depends(get_session)):
 
 
 
-@router.get("/agents/{agent_id}", response_model=AgentResponse)
-def get_agent(agent_id: int, db: Session = Depends(get_session)):
-    """Get a single agent."""
+@router.get("/projects/{project_id}/agents/{agent_id}", response_model=AgentResponse)
+def get_agent(project_id: int, agent_id: int, db: Session = Depends(get_session)):
+    """Get a single agent (scoped to project)."""
     agent = db.get(Agent, agent_id)
-    if not agent:
-        raise HTTPException(404, "Agent not found")
+    if not agent or agent.project_id != project_id:
+        raise HTTPException(404, "Agent not found in this project")
     return _to_response(agent)
 
 
@@ -111,4 +115,8 @@ def _to_response(agent: Agent) -> AgentResponse:
         team_name=agent.team_name,
         is_lead=agent.is_lead,
         created_at=agent.created_at,
+        cli_agent_id=agent.cli_agent_id,
+        agent_color=agent.agent_color,
+        parent_agent_id=agent.parent_agent_id,
+        orchestration_mode=agent.orchestration_mode or "cli",
     )

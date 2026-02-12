@@ -22,6 +22,7 @@ import {
     HomeOutlined,
     ThunderboltOutlined,
     CheckCircleFilled,
+    HighlightOutlined,
 } from "@ant-design/icons";
 import useAgentStore from "@/stores/useAgentStore";
 import useTaskStore from "@/stores/useTaskStore";
@@ -33,6 +34,7 @@ const NAV_ITEMS = [
     { key: "/kanban", icon: <ProjectOutlined />, label: "Kanban Board", desc: "Task management" },
     { key: "/team", icon: <TeamOutlined />, label: "Team", desc: "Manage agents" },
     { key: "/office", icon: <HomeOutlined />, label: "Office", desc: "Virtual office" },
+    { key: "/sprite-editor", icon: <HighlightOutlined />, label: "Sprite Editor", desc: "Create pixel art" },
 ];
 
 /* ── Transition ──────────────────────────────────────────────── */

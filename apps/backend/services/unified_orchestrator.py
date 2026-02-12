@@ -18,9 +18,11 @@ import shutil
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from config import settings
+from database import engine as db_engine
 from models.agent import Agent, AgentRole, AgentStatus
 from models.session import AgentSession, SessionStatus
 from models.task import Task, TaskStatus
@@ -82,9 +84,14 @@ class UnifiedTeamOrchestrator:
         self.ws = ws_manager
         self.git = GitWorkspaceManager(settings.WORKTREE_BASE)
         self.dispatcher = TaskDispatcher()
+        self._engine = db_engine
         self._teams: dict[int, TeamState] = {}
         self._cli_processes: dict[int, asyncio.subprocess.Process] = {}
         self._monitors: dict[int, asyncio.Task] = {}
+
+    def _get_db(self) -> Session:
+        """Create a fresh DB session for async callbacks (not tied to request lifecycle)."""
+        return Session(self._engine)
 
     # ═══════════════════════════════════════════════════════════════
     # TEAM LIFECYCLE
@@ -149,7 +156,7 @@ class UnifiedTeamOrchestrator:
             return {"error": str(e)}
 
         # 3. Build NL prompt from preset
-        prompt = build_team_creation_prompt(preset_id, f"Working directory: {repo_path}")
+        prompt = build_team_creation_prompt(preset_id, f"Working directory: {repo_path}", team_name=team_name)
 
         # 4. Track team state
         state = TeamState(project_id, team_name, preset_id)
@@ -157,8 +164,8 @@ class UnifiedTeamOrchestrator:
         state.agent_ids = [lead.id]
         self._teams[project_id] = state
 
-        # 5. Start CLI session + file watcher
-        await self._start_cli_team_session(db, project_id, lead, prompt, repo_path)
+        # 5. Start CLI session + file watcher (no db — uses fresh sessions)
+        await self._start_cli_team_session(project_id, lead.id, prompt, repo_path, lead.model)
 
         # 6. Broadcast team created
         await self.ws.broadcast(
@@ -228,7 +235,7 @@ class UnifiedTeamOrchestrator:
         state.agent_ids = [lead.id]
         self._teams[project_id] = state
 
-        await self._start_cli_team_session(db, project_id, lead, cli_prompt, repo_path)
+        await self._start_cli_team_session(project_id, lead.id, cli_prompt, repo_path, lead.model)
 
         await self.ws.broadcast(
             project_id,
@@ -316,13 +323,18 @@ class UnifiedTeamOrchestrator:
 
     async def _start_cli_team_session(
         self,
-        db: Session,
         project_id: int,
-        lead: Agent,
+        lead_id: int,
         prompt: str,
         repo_path: str,
+        model: str = "",
     ):
-        """Start Claude CLI with Agent Teams + file watcher."""
+        """Start Claude CLI with Agent Teams + file watcher.
+
+        NOTE: Does NOT accept a `db` session parameter — all DB access uses
+        fresh sessions via `self._get_db()` to avoid stale session issues
+        in long-running async callbacks and monitor tasks.
+        """
         resolved_cli = shutil.which(settings.CLAUDE_CLI)
         if not resolved_cli:
             logger.error(f"Claude CLI not found at '{settings.CLAUDE_CLI}'")
@@ -330,11 +342,10 @@ class UnifiedTeamOrchestrator:
 
         cmd = [
             resolved_cli,
-            "--print", "--output-format", "stream-json",
-            "--teammate-mode", settings.TEAMMATE_MODE,
+            "--print", "--verbose", "--output-format", "stream-json",
         ]
-        if lead.model:
-            cmd.extend(["--model", lead.model])
+        if model:
+            cmd.extend(["--model", model])
         cmd.extend(["-p", prompt])
 
         env = {**os.environ, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"}
@@ -343,28 +354,30 @@ class UnifiedTeamOrchestrator:
             *cmd, cwd=repo_path, env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            stdin=asyncio.subprocess.PIPE,
-            preexec_fn=os.setsid if os.name != "nt" else None,
+            stdin=asyncio.subprocess.DEVNULL,
         )
         self._cli_processes[project_id] = proc
 
-        # Update lead status
-        lead.status = AgentStatus.WORKING
-        db.add(lead)
-        lead_session = db.exec(
-            select(AgentSession).where(AgentSession.agent_id == lead.id)
-        ).first()
-        if lead_session:
-            lead_session.status = SessionStatus.RUNNING
-            lead_session.pid = proc.pid
-            db.add(lead_session)
-        db.commit()
+        # Update lead status with fresh session
+        with self._get_db() as db:
+            lead = db.get(Agent, lead_id)
+            if lead:
+                lead.status = AgentStatus.WORKING
+                db.add(lead)
+            lead_session = db.exec(
+                select(AgentSession).where(AgentSession.agent_id == lead_id)
+            ).first()
+            if lead_session:
+                lead_session.status = SessionStatus.RUNNING
+                lead_session.pid = proc.pid
+                db.add(lead_session)
+            db.commit()
 
-        await self._emit_agent_status(project_id, lead.id, "working", "CLI session started")
+        await self._emit_agent_status(project_id, lead_id, "working", "CLI session started")
 
-        # Start CLI output monitor
+        # Start CLI output monitor (no db param — uses fresh sessions internally)
         cli_monitor = asyncio.create_task(
-            self._monitor_cli_session(db, project_id, lead, proc)
+            self._monitor_cli_session(project_id, lead_id, proc)
         )
         self._monitors[project_id] = cli_monitor
 
@@ -375,15 +388,15 @@ class UnifiedTeamOrchestrator:
         watcher = TeamFileWatcher(team_name, poll_interval=settings.FILE_WATCHER_POLL_INTERVAL)
         state.file_watcher = watcher
 
-        # Wire callbacks
+        # Wire callbacks — NO db parameter (callbacks use self._get_db())
         watcher.on_member_joined(
-            lambda member: self._on_file_member_joined(db, project_id, member)
+            lambda member: self._on_file_member_joined(project_id, member)
         )
         watcher.on_member_left(
-            lambda agent_id: self._on_file_member_left(db, project_id, agent_id)
+            lambda agent_id: self._on_file_member_left(project_id, agent_id)
         )
         watcher.on_inbox_message(
-            lambda inbox, msg: self._on_file_inbox_message(db, project_id, inbox, msg)
+            lambda inbox, msg: self._on_file_inbox_message(project_id, inbox, msg)
         )
         watcher.on_task_update(
             lambda task_data, is_new: self._on_file_task_update(project_id, task_data, is_new)
@@ -401,12 +414,14 @@ class UnifiedTeamOrchestrator:
 
     async def _monitor_cli_session(
         self,
-        db: Session,
         project_id: int,
-        lead: Agent,
+        lead_id: int,
         proc: asyncio.subprocess.Process,
     ):
-        """Monitor CLI lead session — parse streaming JSON for output."""
+        """Monitor CLI lead session — parse streaming JSON for output.
+
+        Uses lead_id (int) instead of Agent object to avoid stale ORM references.
+        """
 
         async def _read_stream(stream, source: str):
             try:
@@ -416,20 +431,48 @@ class UnifiedTeamOrchestrator:
                         continue
                     try:
                         data = json.loads(line)
-                        event_type = data.get("type", "text")
-                        content = data.get("content", data.get("text", line))
+                        event_type = data.get("type", "")
 
-                        await self._emit_log(project_id, lead.id, content, event_type)
+                        if event_type == "system":
+                            continue
 
-                        if event_type == "tool_use":
-                            await self._emit_tool_event(project_id, lead.id, {
-                                "type": "tool_use",
-                                "content": content,
-                                "raw": data.get("raw"),
-                            })
+                        elif event_type == "assistant":
+                            msg = data.get("message", {})
+                            for block in msg.get("content", []):
+                                if block.get("type") == "text" and block.get("text"):
+                                    await self._emit_log(project_id, lead_id, block["text"])
+                                elif block.get("type") == "tool_use":
+                                    tool_name = block.get("name", "tool")
+                                    tool_input = block.get("input", {})
+                                    desc = tool_input.get("description", tool_input.get("name", ""))
+                                    await self._emit_log(project_id, lead_id, f"[{tool_name}] {desc}", "tool")
+
+                        elif event_type == "user":
+                            tool_result = data.get("tool_use_result", {})
+                            if tool_result.get("status") == "teammate_spawned":
+                                name = tool_result.get("name", "")
+                                color = tool_result.get("color", "")
+                                await self._emit_log(
+                                    project_id, lead_id,
+                                    f"Teammate spawned: {name} (color: {color})",
+                                    "success",
+                                )
+
+                        elif event_type == "result":
+                            result_text = data.get("result", "")
+                            cost = data.get("total_cost_usd", 0)
+                            turns = data.get("num_turns", 0)
+                            duration = data.get("duration_ms", 0)
+                            await self._emit_log(
+                                project_id, lead_id,
+                                f"Session done: {turns} turns, {duration}ms, ${cost:.4f}",
+                                "success",
+                            )
+                        else:
+                            await self._emit_log(project_id, lead_id, line, source)
 
                     except json.JSONDecodeError:
-                        await self._emit_log(project_id, lead.id, line, source)
+                        await self._emit_log(project_id, lead_id, line, source)
 
             except asyncio.CancelledError:
                 pass
@@ -444,16 +487,19 @@ class UnifiedTeamOrchestrator:
         except asyncio.CancelledError:
             pass
 
-        # Session ended
-        lead.status = AgentStatus.IDLE
-        db.add(lead)
-        lead_session = db.exec(
-            select(AgentSession).where(AgentSession.agent_id == lead.id)
-        ).first()
-        if lead_session:
-            lead_session.status = SessionStatus.IDLE
-            db.add(lead_session)
-        db.commit()
+        # Session ended — use fresh DB session
+        with self._get_db() as db:
+            lead = db.get(Agent, lead_id)
+            if lead:
+                lead.status = AgentStatus.IDLE
+                db.add(lead)
+            lead_session = db.exec(
+                select(AgentSession).where(AgentSession.agent_id == lead_id)
+            ).first()
+            if lead_session:
+                lead_session.status = SessionStatus.IDLE
+                db.add(lead_session)
+            db.commit()
 
         await self.ws.broadcast(
             project_id,
@@ -467,7 +513,7 @@ class UnifiedTeamOrchestrator:
     # FILE WATCHER CALLBACKS
     # ═══════════════════════════════════════════════════════════════
 
-    async def _on_file_member_joined(self, db: Session, project_id: int, member_data: dict):
+    async def _on_file_member_joined(self, project_id: int, member_data: dict):
         """File watcher detected a new member in config.json."""
         state = self._teams.get(project_id)
         if not state:
@@ -480,37 +526,42 @@ class UnifiedTeamOrchestrator:
         if "team-lead" in agent_id_str or name == "team-lead":
             return
 
-        # Skip if already exists
-        existing = db.exec(
-            select(Agent).where(
-                Agent.project_id == project_id,
-                Agent.team_name == state.team_name,
-                Agent.cli_agent_id == agent_id_str,
+        with self._get_db() as db:
+            # Skip if already exists
+            existing = db.exec(
+                select(Agent).where(
+                    Agent.project_id == project_id,
+                    Agent.team_name == state.team_name,
+                    Agent.cli_agent_id == agent_id_str,
+                )
+            ).first()
+            if existing:
+                return
+
+            role = _map_agent_type_to_role(member_data.get("agentType", ""))
+            color = member_data.get("color", "")
+
+            agent = Agent(
+                project_id=project_id,
+                name=name,
+                role=role,
+                avatar_key=role.value,
+                is_lead=False,
+                team_name=state.team_name,
+                parent_agent_id=state.lead_agent_id,
+                orchestration_mode="cli",
+                status=AgentStatus.WORKING,
+                cli_agent_id=agent_id_str,
+                agent_color=color,
             )
-        ).first()
-        if existing:
-            return
-
-        role = _map_agent_type_to_role(member_data.get("agentType", ""))
-        color = member_data.get("color", "")
-
-        agent = Agent(
-            project_id=project_id,
-            name=name,
-            role=role,
-            avatar_key=role.value,
-            is_lead=False,
-            team_name=state.team_name,
-            parent_agent_id=state.lead_agent_id,
-            orchestration_mode="cli",
-            status=AgentStatus.WORKING,
-            cli_agent_id=agent_id_str,
-            agent_color=color,
-        )
-        db.add(agent)
-        db.commit()
-        db.refresh(agent)
-        state.agent_ids.append(agent.id)
+            db.add(agent)
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                return
+            db.refresh(agent)
+            state.agent_ids.append(agent.id)
 
         await self.ws.broadcast(
             project_id,
@@ -518,35 +569,36 @@ class UnifiedTeamOrchestrator:
         )
         logger.info(f"File watcher: member joined '{name}' -> agent-{agent.id}")
 
-    async def _on_file_member_left(self, db: Session, project_id: int, agent_id_str: str):
+    async def _on_file_member_left(self, project_id: int, agent_id_str: str):
         """File watcher detected a member removed from config.json."""
         name = agent_id_str.split("@")[0] if "@" in agent_id_str else agent_id_str
-        agent = db.exec(
-            select(Agent).where(
-                Agent.project_id == project_id,
-                Agent.cli_agent_id == agent_id_str,
-            )
-        ).first()
-        if not agent:
+        with self._get_db() as db:
             agent = db.exec(
                 select(Agent).where(
                     Agent.project_id == project_id,
-                    Agent.name == name,
+                    Agent.cli_agent_id == agent_id_str,
                 )
             ).first()
-        if agent:
-            agent.status = AgentStatus.STOPPED
-            db.add(agent)
-            db.commit()
-            await self.ws.broadcast(
-                project_id,
-                WSEvent(type=EVENT_TEAM_AGENT_COMPLETED, data={
-                    "agent_id": agent.id, "name": agent.name,
-                }),
-            )
+            if not agent:
+                agent = db.exec(
+                    select(Agent).where(
+                        Agent.project_id == project_id,
+                        Agent.name == name,
+                    )
+                ).first()
+            if agent:
+                agent.status = AgentStatus.STOPPED
+                db.add(agent)
+                db.commit()
+                await self.ws.broadcast(
+                    project_id,
+                    WSEvent(type=EVENT_TEAM_AGENT_COMPLETED, data={
+                        "agent_id": agent.id, "name": agent.name,
+                    }),
+                )
 
     async def _on_file_inbox_message(
-        self, db: Session, project_id: int, inbox_name: str, msg: dict,
+        self, project_id: int, inbox_name: str, msg: dict,
     ):
         """File watcher detected a new inbox message."""
         text = msg.get("text", "")
@@ -564,55 +616,60 @@ class UnifiedTeamOrchestrator:
             msg_type = parsed.get("type", "")
 
             if msg_type == "idle_notification":
-                agent = self._find_agent_by_name(db, project_id, parsed.get("from", from_agent))
-                if agent:
-                    agent.status = AgentStatus.IDLE
-                    db.add(agent)
-                    db.commit()
-                    await self._emit_agent_status(project_id, agent.id, "idle", "Available")
+                with self._get_db() as db:
+                    agent = self._find_agent_by_name(db, project_id, parsed.get("from", from_agent))
+                    if agent:
+                        agent.status = AgentStatus.IDLE
+                        db.add(agent)
+                        db.commit()
+                        await self._emit_agent_status(project_id, agent.id, "idle", "Available")
                 return
 
             if msg_type == "task_assignment":
                 subject = parsed.get("subject", "")
                 to_name = inbox_name  # Task is assigned TO the inbox owner
-                agent = self._find_agent_by_name(db, project_id, to_name)
-                if agent:
-                    agent.status = AgentStatus.WORKING
-                    db.add(agent)
-                    db.commit()
-                    await self.ws.broadcast(
-                        project_id,
-                        WSEvent(type=EVENT_TEAM_TASK_DELEGATED, data={
-                            "to_agent_id": agent.id,
-                            "to_agent_name": agent.name,
-                            "description": subject,
-                        }),
-                    )
+                with self._get_db() as db:
+                    agent = self._find_agent_by_name(db, project_id, to_name)
+                    if agent:
+                        agent.status = AgentStatus.WORKING
+                        db.add(agent)
+                        db.commit()
+                        await self.ws.broadcast(
+                            project_id,
+                            WSEvent(type=EVENT_TEAM_TASK_DELEGATED, data={
+                                "to_agent_id": agent.id,
+                                "to_agent_name": agent.name,
+                                "description": subject,
+                            }),
+                        )
                 return
 
             if msg_type in ("shutdown_approved", "shutdown_request"):
-                agent = self._find_agent_by_name(db, project_id, parsed.get("from", from_agent))
-                if agent:
-                    agent.status = AgentStatus.STOPPED
-                    db.add(agent)
-                    db.commit()
-                    await self.ws.broadcast(
-                        project_id,
-                        WSEvent(type=EVENT_TEAM_AGENT_COMPLETED, data={
-                            "agent_id": agent.id, "name": agent.name,
-                        }),
-                    )
+                with self._get_db() as db:
+                    agent = self._find_agent_by_name(db, project_id, parsed.get("from", from_agent))
+                    if agent:
+                        agent.status = AgentStatus.STOPPED
+                        db.add(agent)
+                        db.commit()
+                        await self.ws.broadcast(
+                            project_id,
+                            WSEvent(type=EVENT_TEAM_AGENT_COMPLETED, data={
+                                "agent_id": agent.id, "name": agent.name,
+                            }),
+                        )
                 return
 
         # Regular text message
         summary = msg.get("summary", "")
         display = summary if summary else (text[:300] if text else "")
-        agent = self._find_agent_by_name(db, project_id, from_agent)
+        with self._get_db() as db:
+            agent = self._find_agent_by_name(db, project_id, from_agent)
+            agent_id = agent.id if agent else None
 
         await self.ws.broadcast(
             project_id,
             WSEvent(type=EVENT_TEAM_MESSAGE, data={
-                "agent_id": agent.id if agent else None,
+                "agent_id": agent_id,
                 "from": from_agent,
                 "inbox": inbox_name,
                 "message": display,
@@ -640,16 +697,34 @@ class UnifiedTeamOrchestrator:
     # ═══════════════════════════════════════════════════════════════
 
     async def send_command_to_lead(self, project_id: int, message: str) -> dict:
-        """Write command to CLI process stdin."""
+        """Send command to lead agent via team inbox file."""
+        state = self._teams.get(project_id)
+        if not state:
+            return {"error": "No active team"}
+
         proc = self._cli_processes.get(project_id)
         if not proc or proc.returncode is not None:
             return {"error": "No active lead session"}
-        try:
-            proc.stdin.write(f"{message}\n".encode())
-            await proc.stdin.drain()
-            return {"sent": True}
-        except Exception as e:
-            return {"error": str(e)}
+
+        # Write to lead's inbox file if file watcher knows the team dir
+        if state.file_watcher and state.file_watcher.team_dir:
+            import time
+            inbox_path = state.file_watcher.team_dir / "inboxes" / "lead.json"
+            inbox_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                existing = json.loads(inbox_path.read_text()) if inbox_path.exists() else []
+            except (json.JSONDecodeError, OSError):
+                existing = []
+            existing.append({
+                "from": "chibi-office",
+                "text": message,
+                "timestamp": time.time(),
+                "read": False,
+            })
+            inbox_path.write_text(json.dumps(existing, indent=2))
+            return {"sent": True, "via": "inbox"}
+
+        return {"error": "Lead session is running but inbox not available yet"}
 
     async def broadcast_message(self, project_id: int, message: str) -> dict:
         """Broadcast message to all agents via lead."""
@@ -698,17 +773,11 @@ class UnifiedTeamOrchestrator:
         proc = self._cli_processes.pop(project_id, None)
         if proc and proc.returncode is None:
             try:
-                if os.name != "nt":
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                else:
-                    proc.terminate()
+                proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except (ProcessLookupError, asyncio.TimeoutError):
                 try:
-                    if os.name != "nt":
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    else:
-                        proc.kill()
+                    proc.kill()
                 except ProcessLookupError:
                     pass
 

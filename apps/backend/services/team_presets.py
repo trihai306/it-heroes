@@ -219,7 +219,7 @@ def get_preset_summary() -> list[dict]:
 # ─── Prompt Translation (Preset → Natural Language for CLI Agent Teams) ───
 
 
-def build_team_creation_prompt(preset_id: str, project_context: str = "") -> str:
+def build_team_creation_prompt(preset_id: str, project_context: str = "", team_name: str = "") -> str:
     """Convert a preset into a natural language prompt that tells Claude CLI
     to create an agent team with specific teammates.
 
@@ -243,8 +243,9 @@ def build_team_creation_prompt(preset_id: str, project_context: str = "") -> str
     teammates_block = "\n".join(teammate_lines)
     num_teammates = len(preset["agents"])
 
+    team_name_str = team_name or f"{preset_id}-team"
     prompt = (
-        f"Create an agent team with {num_teammates} teammates.\n\n"
+        f"Create an agent team called \"{team_name_str}\" with {num_teammates} teammates.\n\n"
         f"{preset['lead_prompt']}\n\n"
         f"Create these specific teammates:\n"
         f"{teammates_block}\n\n"

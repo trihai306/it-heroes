@@ -9,9 +9,6 @@ const agentService = {
     /** List agents for a project */
     list: (projectId) => api.get(`/projects/${projectId}/agents`),
 
-    /** Update agent (rules, name, etc.) */
-    update: (agentId, data) => api.patch(`/agents/${agentId}`, data),
-
     /* ── Team Management (CLI Agent Teams) ─────────────── */
 
     /** Get team presets (from team_presets.py) */

@@ -10,7 +10,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from config import settings
 from database import create_db_and_tables
 from routers import projects, tasks, agents
-from routers.orchestration import router as orchestration_router
 from routers.filesystem import router as filesystem_router
 from routers.workflows import router as workflows_router
 from routers.auth import router as auth_router
@@ -70,7 +69,6 @@ unified_orchestrator = UnifiedTeamOrchestrator(ws_manager)
 app.include_router(projects.router)
 app.include_router(tasks.router)
 app.include_router(agents.router)
-app.include_router(orchestration_router)
 app.include_router(filesystem_router)
 app.include_router(workflows_router)
 app.include_router(auth_router)

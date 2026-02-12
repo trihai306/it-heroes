@@ -1,0 +1,550 @@
+/**
+ * PixelArtEditor.css — Premium dark theme for the Pixel Art Sprite Editor
+ */
+
+/* ── Root container ─────────────────────────────────────────── */
+.pixel-editor {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 92px);
+    gap: 0;
+    font-family: "Inter", "SF Pro Display", -apple-system, sans-serif;
+    color: var(--text-primary, #e2e8f0);
+}
+
+/* ── Toolbar ────────────────────────────────────────────────── */
+.pe-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg-surface, #1a1b2e);
+    border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+    border-radius: 10px;
+    flex-wrap: wrap;
+}
+
+.pe-toolbar-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 6px;
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.pe-toolbar-group:last-child {
+    border-right: none;
+}
+
+.pe-toolbar-right {
+    margin-left: auto;
+}
+
+.pe-tool-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary, rgba(255, 255, 255, 0.6));
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.pe-tool-btn:hover {
+    background: rgba(99, 102, 241, 0.1);
+    color: var(--text-primary, #e2e8f0);
+    border-color: rgba(99, 102, 241, 0.2);
+}
+
+.pe-tool-btn.active {
+    background: rgba(99, 102, 241, 0.15);
+    color: #818cf8;
+    border-color: rgba(99, 102, 241, 0.3);
+    box-shadow: 0 0 12px rgba(99, 102, 241, 0.15);
+}
+
+.pe-tool-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
+
+.pe-tool-icon {
+    font-size: 14px;
+    line-height: 1;
+}
+
+.pe-tool-label {
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.pe-grid-toggle {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.pe-grid-toggle input {
+    accent-color: #6366f1;
+}
+
+.pe-zoom-ctrl {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.pe-zoom-ctrl button {
+    width: 24px;
+    height: 24px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.pe-zoom-ctrl button:hover {
+    background: rgba(99, 102, 241, 0.1);
+}
+
+.pe-action-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 30px;
+    padding: 0 10px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.pe-action-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+}
+
+.pe-export-btn {
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(139, 92, 246, 0.15));
+    border-color: rgba(99, 102, 241, 0.3);
+    color: #a5b4fc;
+}
+
+.pe-export-btn:hover {
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(139, 92, 246, 0.25));
+    color: #c7d2fe;
+}
+
+/* ── Main layout ────────────────────────────────────────────── */
+.pe-main {
+    display: flex;
+    gap: 16px;
+    flex: 1;
+    overflow: hidden;
+    padding: 12px 0;
+}
+
+/* ── Canvas panel ───────────────────────────────────────────── */
+.pe-canvas-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    overflow: auto;
+}
+
+.pe-canvas-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    max-width: 500px;
+    padding: 6px 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.pe-canvas-size {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    padding: 2px 6px;
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 4px;
+    color: var(--text-muted);
+}
+
+.pe-canvas-container {
+    position: relative;
+    border: 2px solid rgba(99, 102, 241, 0.2);
+    border-radius: 4px;
+    background: repeating-conic-gradient(rgba(255, 255, 255, 0.03) 0% 25%, transparent 0% 50%) 50% / 16px 16px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3), 0 0 40px rgba(99, 102, 241, 0.05);
+}
+
+.pe-canvas {
+    display: block;
+    image-rendering: pixelated;
+}
+
+/* ── Right panel ────────────────────────────────────────────── */
+.pe-right-panel {
+    width: 240px;
+    min-width: 240px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.pe-section {
+    background: var(--bg-surface, #1a1b2e);
+    border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+    border-radius: 10px;
+    padding: 10px;
+}
+
+.pe-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+
+.pe-section-subtitle {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-muted);
+    margin: 6px 0 4px;
+}
+
+/* ── Color picker ───────────────────────────────────────────── */
+.pe-color-current {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.pe-color-swatch-big {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    border: 2px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.pe-color-input {
+    width: 36px;
+    height: 36px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    background: transparent;
+    padding: 0;
+}
+
+.pe-color-input::-webkit-color-swatch-wrapper {
+    padding: 2px;
+}
+
+.pe-color-input::-webkit-color-swatch {
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 5px;
+}
+
+/* ── Palette ────────────────────────────────────────────────── */
+.pe-palette-tabs {
+    display: flex;
+    gap: 2px;
+    margin-bottom: 6px;
+}
+
+.pe-palette-tab {
+    flex: 1;
+    height: 24px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-family: inherit;
+    font-weight: 500;
+    cursor: pointer;
+    text-transform: capitalize;
+    transition: all 0.15s ease;
+}
+
+.pe-palette-tab:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.pe-palette-tab.active {
+    background: rgba(99, 102, 241, 0.15);
+    color: #818cf8;
+}
+
+.pe-palette-grid {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 3px;
+}
+
+.pe-color-swatch {
+    width: 100%;
+    aspect-ratio: 1;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.1s ease;
+    padding: 0;
+}
+
+.pe-color-swatch:hover {
+    transform: scale(1.2);
+    z-index: 1;
+    border-color: rgba(255, 255, 255, 0.3);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.pe-color-swatch.active {
+    border-color: #fff;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.5);
+    transform: scale(1.15);
+}
+
+/* ── Animation preview ──────────────────────────────────────── */
+.pe-anim-preview {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+}
+
+.pe-anim-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+}
+
+.pe-play-btn {
+    width: 32px;
+    height: 32px;
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: 8px;
+    background: rgba(99, 102, 241, 0.1);
+    color: #818cf8;
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+}
+
+.pe-play-btn:hover {
+    background: rgba(99, 102, 241, 0.2);
+}
+
+.pe-play-btn.playing {
+    background: rgba(34, 197, 94, 0.15);
+    border-color: rgba(34, 197, 94, 0.3);
+    color: #22c55e;
+    animation: pulse-glow 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.2);
+    }
+
+    50% {
+        box-shadow: 0 0 12px 2px rgba(34, 197, 94, 0.15);
+    }
+}
+
+.pe-dir-select {
+    flex: 1;
+    height: 28px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-family: inherit;
+    padding: 0 6px;
+    cursor: pointer;
+}
+
+.pe-fps-ctrl {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+.pe-fps-ctrl input[type="range"] {
+    width: 50px;
+    height: 4px;
+    accent-color: #6366f1;
+}
+
+/* ── Templates ──────────────────────────────────────────────── */
+.pe-template-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px;
+}
+
+.pe-template-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 6px 2px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--text-muted);
+    font-size: 9px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.pe-template-btn:hover {
+    background: rgba(99, 102, 241, 0.1);
+    border-color: rgba(99, 102, 241, 0.2);
+    color: var(--text-secondary);
+    transform: translateY(-1px);
+}
+
+.pe-template-btn img {
+    border-radius: 4px;
+}
+
+/* ── Frame strip (bottom) ───────────────────────────────────── */
+.pe-frame-strip {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 12px;
+    background: var(--bg-surface, #1a1b2e);
+    border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+    border-radius: 10px;
+}
+
+.pe-frame-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.pe-frame-dir {
+    width: 40px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    text-align: right;
+    flex-shrink: 0;
+}
+
+.sprite-frame-thumb {
+    position: relative;
+    border: 2px solid rgba(255, 255, 255, 0.06);
+    border-radius: 6px;
+    padding: 2px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.sprite-frame-thumb:hover {
+    border-color: rgba(99, 102, 241, 0.3);
+    background: rgba(99, 102, 241, 0.05);
+}
+
+.sprite-frame-thumb.active {
+    border-color: #6366f1;
+    box-shadow: 0 0 12px rgba(99, 102, 241, 0.2);
+    background: rgba(99, 102, 241, 0.08);
+}
+
+.sprite-frame-thumb canvas {
+    display: block;
+    border-radius: 3px;
+    background: repeating-conic-gradient(rgba(255, 255, 255, 0.03) 0% 25%, transparent 0% 50%) 50% / 8px 8px;
+}
+
+.frame-label {
+    position: absolute;
+    bottom: -1px;
+    right: 2px;
+    font-size: 8px;
+    font-weight: 600;
+    color: var(--text-muted);
+    opacity: 0.6;
+}
+
+.pe-frame-copy-btn {
+    width: 28px;
+    height: 28px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+}
+
+.pe-frame-copy-btn:hover {
+    background: rgba(99, 102, 241, 0.1);
+    border-color: rgba(99, 102, 241, 0.2);
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────── */
+.pe-right-panel::-webkit-scrollbar {
+    width: 4px;
+}
+
+.pe-right-panel::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.pe-right-panel::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 2px;
+}

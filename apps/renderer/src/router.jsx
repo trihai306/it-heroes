@@ -8,6 +8,7 @@ import TeamPage from "@/pages/TeamPage";
 import OfficePage from "@/pages/OfficePage";
 import LogsPage from "@/pages/LogsPage";
 import TerminalPage from "@/pages/TerminalPage";
+import SpriteEditorPage from "@/pages/SpriteEditorPage";
 
 export default function AppRouter({ logs, clearLogs, agents }) {
     return (
@@ -17,6 +18,7 @@ export default function AppRouter({ logs, clearLogs, agents }) {
             <Route path="/kanban" element={<KanbanPage />} />
             <Route path="/team" element={<TeamPage />} />
             <Route path="/office" element={<OfficePage />} />
+            <Route path="/sprite-editor" element={<SpriteEditorPage />} />
             <Route path="/logs" element={<LogsPage logs={logs} onClear={clearLogs} />} />
             <Route path="/terminal" element={<TerminalPage logs={logs} agents={agents} />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />

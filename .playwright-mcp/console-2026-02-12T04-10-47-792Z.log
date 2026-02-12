@@ -1,0 +1,2 @@
+[    9740ms] [ERROR] Access to fetch at 'http://127.0.0.1:8420/projects/1/teams/cleanup' from origin 'http://localhost:5173' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource. @ http://localhost:5173/team:0
+[    9740ms] [ERROR] Failed to load resource: net::ERR_FAILED @ http://127.0.0.1:8420/projects/1/teams/cleanup:0
