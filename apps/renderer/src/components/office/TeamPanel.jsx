@@ -2,7 +2,7 @@
  * TeamPanel — Unified Agent Teams UI.
  *
  * Uses the unified orchestrator backend:
- * - Preset-based team creation (SDK subagents)
+ * - Preset-based team creation (CLI Agent Teams)
  * - Custom prompt team creation
  * - Per-agent status dashboard
  * - Real-time updates via WebSocket (no polling)
@@ -466,7 +466,10 @@ export default function TeamPanel() {
                             const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.idle;
                             return (
                                 <div key={agent.id} style={sty.agentRow}>
-                                    <span style={{ fontSize: 16, width: 24, textAlign: "center" }}>
+                                    <span style={{
+                                        fontSize: 16, width: 24, textAlign: "center",
+                                        ...(agent.agent_color ? { textShadow: `0 0 6px ${agent.agent_color}` } : {}),
+                                    }}>
                                         {ROLE_EMOJIS[agent.role] || ROLE_EMOJIS.custom}
                                     </span>
                                     <div style={{ flex: 1 }}>
@@ -484,9 +487,9 @@ export default function TeamPanel() {
                                                 </Tag>
                                             )}
                                         </div>
-                                        {agent.sdk_agent_key && (
+                                        {agent.cli_agent_id && (
                                             <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                                                {agent.sdk_agent_key}
+                                                {agent.cli_agent_id}
                                             </div>
                                         )}
                                     </div>

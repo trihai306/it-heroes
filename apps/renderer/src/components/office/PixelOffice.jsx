@@ -1,11 +1,11 @@
 /**
  * PixelOffice — 2D Pixel-Art Virtual Office (Gather.town-inspired)
  *
- * Renders a top-down pixel office where AI agents sit at desks,
- * show their current status, and chat with each other.
+ * Uses sprite-sheet characters and pixel-art office tiles for a
+ * rich retro environment where AI agents walk, sit, and chat.
  */
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
-import { Typography, Input, Badge, Tooltip, Empty } from "antd";
+import { Typography, Badge } from "antd";
 import {
     SendOutlined,
     ZoomInOutlined,
@@ -22,11 +22,41 @@ import "./PixelOffice.css";
 const { Text } = Typography;
 
 /* ═══════════════════════════════════════════════════════════════
-   CONSTANTS & CONFIG
+   CONSTANTS
    ═══════════════════════════════════════════════════════════════ */
-const TILE = 32; // px per tile
-const MAP_W = 30; // tiles wide
-const MAP_H = 20; // tiles tall
+const TILE = 32;
+const MAP_W = 30;
+const MAP_H = 20;
+const SPRITE_W = 32;
+const SPRITE_H = 48;
+const CHAR_SHEET = "/sprites/characters.png";
+const TILE_SHEET = "/sprites/office_tiles.png";
+
+/* ── Sprite sheet layout: 6 columns × 6 rows ───────────────── */
+/* Col: 0=front, 1=front-walk, 2=back, 3=back-walk, 4=side, 5=working */
+/* Row: 0=lead, 1=backend, 2=frontend, 3=qa, 4=docs, 5=security       */
+const ROLE_ROW = { lead: 0, backend: 1, frontend: 2, qa: 3, docs: 4, security: 5, custom: 1 };
+
+/* Department zone configs */
+const DEPT_CONFIG = {
+    lead: { color: "#fbbf24", bg: "rgba(251,191,36,0.06)", emoji: "👑", label: "Management" },
+    backend: { color: "#818cf8", bg: "rgba(129,140,248,0.06)", emoji: "⚙️", label: "Backend" },
+    frontend: { color: "#f472b6", bg: "rgba(244,114,182,0.06)", emoji: "🎨", label: "Frontend" },
+    qa: { color: "#34d399", bg: "rgba(52,211,153,0.06)", emoji: "🧪", label: "QA" },
+    docs: { color: "#60a5fa", bg: "rgba(96,165,250,0.06)", emoji: "📄", label: "Docs" },
+    security: { color: "#f97316", bg: "rgba(249,115,22,0.06)", emoji: "🛡️", label: "Security" },
+    custom: { color: "#a78bfa", bg: "rgba(167,139,250,0.06)", emoji: "🤖", label: "Other" },
+};
+
+/* Department desk zones (tile coordinates) */
+const DEPT_ZONES = {
+    lead: { x: 2, y: 2, w: 7, h: 5 },
+    backend: { x: 11, y: 2, w: 8, h: 5 },
+    frontend: { x: 21, y: 2, w: 7, h: 5 },
+    qa: { x: 2, y: 10, w: 7, h: 5 },
+    docs: { x: 11, y: 10, w: 8, h: 5 },
+    security: { x: 21, y: 10, w: 7, h: 5 },
+};
 
 /* Palette for the tilemap */
 const COLORS = {
@@ -45,68 +75,45 @@ const COLORS = {
     chair: "#4a4a6a",
     window: "#6ea8d9",
     windowFrame: "#3a3c55",
-    bookshelf: "#5c4a3a",
     whiteboard: "#d4d4d8",
     coffee: "#8B6914",
-    rug: "#5a3e5a",
     lamp: "#fbbf24",
+    rugBorder: "#6a4a6a",
 };
 
-/* Department zone configs */
-const DEPT_CONFIG = {
-    lead: { color: "#fbbf24", bg: "rgba(251,191,36,0.06)", emoji: "👑", label: "Management" },
-    backend: { color: "#818cf8", bg: "rgba(129,140,248,0.06)", emoji: "⚙️", label: "Backend" },
-    frontend: { color: "#f472b6", bg: "rgba(244,114,182,0.06)", emoji: "🎨", label: "Frontend" },
-    qa: { color: "#34d399", bg: "rgba(52,211,153,0.06)", emoji: "🧪", label: "QA" },
-    docs: { color: "#60a5fa", bg: "rgba(96,165,250,0.06)", emoji: "📄", label: "Docs" },
-    security: { color: "#f97316", bg: "rgba(249,115,22,0.06)", emoji: "🛡️", label: "Security" },
-    custom: { color: "#a78bfa", bg: "rgba(167,139,250,0.06)", emoji: "🤖", label: "Other" },
-};
-
-/* Pixel-art character palette per role */
-const CHAR_COLORS = {
-    lead: { hair: "#fbbf24", shirt: "#92400e", skin: "#fcd6a8" },
-    backend: { hair: "#6366f1", shirt: "#312e81", skin: "#ddb896" },
-    frontend: { hair: "#ec4899", shirt: "#831843", skin: "#fcd6a8" },
-    qa: { hair: "#10b981", shirt: "#064e3b", skin: "#c4a882" },
-    docs: { hair: "#3b82f6", shirt: "#1e3a5f", skin: "#fcd6a8" },
-    security: { hair: "#f97316", shirt: "#7c2d12", skin: "#ddb896" },
-    custom: { hair: "#8b5cf6", shirt: "#4c1d95", skin: "#fcd6a8" },
-};
-
-/* Department desk zones (tile coordinates) */
-const DEPT_ZONES = {
-    lead: { x: 2, y: 2, w: 7, h: 5 },
-    backend: { x: 11, y: 2, w: 8, h: 5 },
-    frontend: { x: 21, y: 2, w: 7, h: 5 },
-    qa: { x: 2, y: 10, w: 7, h: 5 },
-    docs: { x: 11, y: 10, w: 8, h: 5 },
-    security: { x: 21, y: 10, w: 7, h: 5 },
-};
-
-/* Furniture definitions (tile coords) */
+/* Static furniture (tile coordinates) */
 const FURNITURE = [
-    // Meeting table (center)
     { type: "table", x: 13, y: 17, w: 4, h: 2 },
-    // Plants
     { type: "plant", x: 0, y: 0 },
     { type: "plant", x: 29, y: 0 },
     { type: "plant", x: 0, y: 19 },
     { type: "plant", x: 29, y: 19 },
     { type: "plant", x: 10, y: 8 },
     { type: "plant", x: 19, y: 8 },
-    // Coffee machine
     { type: "coffee", x: 10, y: 17 },
-    // Whiteboard
+    { type: "coffee", x: 11, y: 17 },
     { type: "whiteboard", x: 11, y: 8, w: 3 },
     { type: "whiteboard", x: 21, y: 8, w: 3 },
+    { type: "bookshelf", x: 25, y: 8 },
+    { type: "bookshelf", x: 26, y: 8 },
+    { type: "plant", x: 5, y: 8 },
+    { type: "lamp", x: 28, y: 17 },
+    { type: "printer", x: 1, y: 17 },
+];
+
+/* Where agents can walk (meeting spots, coffee, etc.) */
+const WANDER_SPOTS = [
+    { x: 13, y: 18 }, { x: 14, y: 18 }, { x: 15, y: 18 }, { x: 16, y: 18 }, // meeting table
+    { x: 10, y: 16 }, { x: 11, y: 16 }, // coffee area
+    { x: 15, y: 9 }, { x: 14, y: 9 },   // hallway
+    { x: 5, y: 9 }, { x: 24, y: 9 },   // cross corridor
 ];
 
 /* ═══════════════════════════════════════════════════════════════
    TILEMAP RENDERER (canvas)
    ═══════════════════════════════════════════════════════════════ */
-function drawTilemap(ctx, w, h, scale) {
-    const T = TILE * scale;
+function drawTilemap(ctx, w, h, tileImg) {
+    const T = TILE;
 
     // Background
     ctx.fillStyle = "#1a1b2e";
@@ -121,40 +128,42 @@ function drawTilemap(ctx, w, h, scale) {
         }
     }
 
-    // Walls (top 1 row + left/right edges)
+    // Walls
     for (let x = 0; x < w; x++) {
+        // Top wall
         ctx.fillStyle = COLORS.wall;
-        ctx.fillRect(x * T, 0, T, T * 0.6);
+        ctx.fillRect(x * T, 0, T, T * 0.7);
         ctx.fillStyle = COLORS.wallTop;
-        ctx.fillRect(x * T, T * 0.6, T, T * 0.4);
-    }
-    // Bottom wall
-    for (let x = 0; x < w; x++) {
+        ctx.fillRect(x * T, T * 0.7, T, T * 0.3);
+        // Bottom wall
+        ctx.fillStyle = COLORS.wallTop;
+        ctx.fillRect(x * T, (h - 1) * T, T, T * 0.3);
         ctx.fillStyle = COLORS.wall;
-        ctx.fillRect(x * T, (h - 1) * T + T * 0.4, T, T * 0.6);
-        ctx.fillStyle = COLORS.wallTop;
-        ctx.fillRect(x * T, (h - 1) * T, T, T * 0.4);
+        ctx.fillRect(x * T, (h - 1) * T + T * 0.3, T, T * 0.7);
     }
-    // Left/right walls
     for (let y = 0; y < h; y++) {
         ctx.fillStyle = COLORS.wall;
         ctx.fillRect(0, y * T, T * 0.3, T);
         ctx.fillRect((w - 1) * T + T * 0.7, y * T, T * 0.3, T);
     }
 
-    // Windows on top wall
+    // Windows (top wall)
     for (let x = 3; x < w - 3; x += 4) {
         ctx.fillStyle = COLORS.windowFrame;
-        ctx.fillRect(x * T + 2, 2, T * 2 - 4, T * 0.5);
+        ctx.fillRect(x * T + 2, 2, T * 2 - 4, T * 0.55);
         ctx.fillStyle = COLORS.window;
-        ctx.fillRect(x * T + 4, 4, T * 2 - 8, T * 0.5 - 4);
-        // Window shine
-        ctx.fillStyle = "rgba(255,255,255,0.15)";
+        ctx.fillRect(x * T + 4, 4, T * 2 - 8, T * 0.45);
+        ctx.fillStyle = "rgba(255,255,255,0.12)";
         ctx.fillRect(x * T + 6, 6, T * 0.4, T * 0.15);
+        ctx.fillStyle = "rgba(135,206,250,0.15)";
+        ctx.fillRect(x * T + T, 4, T - 6, T * 0.45);
     }
 
     // Department zone carpets
-    Object.entries(DEPT_ZONES).forEach(([, zone]) => {
+    Object.values(DEPT_ZONES).forEach((zone) => {
+        // Rug border
+        ctx.fillStyle = COLORS.rugBorder;
+        ctx.fillRect(zone.x * T - 2, zone.y * T - 2, zone.w * T + 4, zone.h * T + 4);
         for (let y = zone.y; y < zone.y + zone.h; y++) {
             for (let x = zone.x; x < zone.x + zone.w; x++) {
                 const isAlt = (x + y) % 2 === 0;
@@ -164,206 +173,469 @@ function drawTilemap(ctx, w, h, scale) {
         }
     });
 
-    // Desks in each department zone
+    // Desks in each zone
     Object.values(DEPT_ZONES).forEach((zone) => {
         const desksPerRow = Math.floor(zone.w / 3);
         for (let row = 0; row < 2; row++) {
             for (let col = 0; col < desksPerRow; col++) {
                 const dx = zone.x + col * 3 + 1;
                 const dy = zone.y + row * 3 + 1;
-                // Desk body
-                ctx.fillStyle = COLORS.desk;
-                ctx.fillRect(dx * T + 2, dy * T + T * 0.3, T * 1.6, T * 0.7);
-                ctx.fillStyle = COLORS.deskTop;
-                ctx.fillRect(dx * T + 2, dy * T + T * 0.2, T * 1.6, T * 0.15);
-                // Monitor
-                ctx.fillStyle = COLORS.monitor;
-                ctx.fillRect(dx * T + T * 0.4, dy * T + 2, T * 0.7, T * 0.35);
-                ctx.fillStyle = COLORS.monitorGlow;
-                ctx.fillRect(dx * T + T * 0.5, dy * T + 4, T * 0.5, T * 0.22);
-                // Monitor stand
-                ctx.fillStyle = "#555";
-                ctx.fillRect(dx * T + T * 0.65, dy * T + T * 0.34, T * 0.2, T * 0.08);
-                // Chair
-                ctx.fillStyle = COLORS.chair;
-                ctx.fillRect(dx * T + T * 0.35, (dy + 1) * T + T * 0.15, T * 0.8, T * 0.6);
-                ctx.fillStyle = "#5a5a7a";
-                ctx.fillRect(dx * T + T * 0.45, (dy + 1) * T + T * 0.05, T * 0.6, T * 0.2);
+                drawDesk(ctx, dx * T, dy * T);
             }
         }
     });
 
-    // Furniture items
+    // Static furniture
     FURNITURE.forEach((f) => {
-        if (f.type === "plant") {
-            // Plant pot
-            ctx.fillStyle = COLORS.plantPot;
-            ctx.fillRect(f.x * T + T * 0.25, f.y * T + T * 0.6, T * 0.5, T * 0.35);
-            // Leaves
-            ctx.fillStyle = COLORS.plant;
-            ctx.fillRect(f.x * T + T * 0.15, f.y * T + T * 0.15, T * 0.7, T * 0.5);
-            ctx.fillStyle = "#4a9d6c";
-            ctx.fillRect(f.x * T + T * 0.3, f.y * T + T * 0.05, T * 0.4, T * 0.3);
-        } else if (f.type === "table") {
-            ctx.fillStyle = "#5c5040";
-            ctx.fillRect(f.x * T + 2, f.y * T + 2, (f.w || 1) * T - 4, (f.h || 1) * T - 4);
-            ctx.fillStyle = "#6e6352";
-            ctx.fillRect(f.x * T + 4, f.y * T + 4, (f.w || 1) * T - 8, (f.h || 1) * T - 8);
-            // Coffee cups on table
-            ctx.fillStyle = "#d4d4d8";
-            ctx.fillRect((f.x + 1) * T + 4, f.y * T + 8, 6, 8);
-            ctx.fillRect((f.x + 2) * T + 8, f.y * T + T + 4, 6, 8);
-        } else if (f.type === "coffee") {
-            ctx.fillStyle = "#5a4a3a";
-            ctx.fillRect(f.x * T + 4, f.y * T + 4, T - 8, T - 8);
-            ctx.fillStyle = COLORS.coffee;
-            ctx.fillRect(f.x * T + 8, f.y * T + 8, T - 16, T * 0.4);
-            // Steam
-            ctx.fillStyle = "rgba(255,255,255,0.2)";
-            ctx.fillRect(f.x * T + T * 0.3, f.y * T, 2, 5);
-            ctx.fillRect(f.x * T + T * 0.55, f.y * T - 2, 2, 5);
-        } else if (f.type === "whiteboard") {
-            const bw = (f.w || 2) * T;
-            ctx.fillStyle = "#3a3c55";
-            ctx.fillRect(f.x * T + 2, f.y * T + 4, bw - 4, T * 0.7);
-            ctx.fillStyle = COLORS.whiteboard;
-            ctx.fillRect(f.x * T + 5, f.y * T + 7, bw - 10, T * 0.55);
-            // Some "writing" on whiteboard
-            ctx.fillStyle = "#818cf8";
-            ctx.fillRect(f.x * T + 10, f.y * T + 12, bw * 0.3, 2);
-            ctx.fillStyle = "#f472b6";
-            ctx.fillRect(f.x * T + 10, f.y * T + 18, bw * 0.5, 2);
-            ctx.fillStyle = "#34d399";
-            ctx.fillRect(f.x * T + 10, f.y * T + 24, bw * 0.4, 2);
-        }
+        if (f.type === "plant") drawPlant(ctx, f.x * T, f.y * T);
+        else if (f.type === "table") drawMeetingTable(ctx, f.x * T, f.y * T, f.w, f.h);
+        else if (f.type === "coffee") drawCoffeeMachine(ctx, f.x * T, f.y * T);
+        else if (f.type === "whiteboard") drawWhiteboard(ctx, f.x * T, f.y * T, f.w || 2);
+        else if (f.type === "bookshelf") drawBookshelf(ctx, f.x * T, f.y * T);
+        else if (f.type === "lamp") drawLamp(ctx, f.x * T, f.y * T);
+        else if (f.type === "printer") drawPrinter(ctx, f.x * T, f.y * T);
     });
 
-    // Grid lines (subtle)
-    ctx.strokeStyle = "rgba(255,255,255,0.03)";
+    // Subtle grid
+    ctx.strokeStyle = "rgba(255,255,255,0.025)";
     ctx.lineWidth = 0.5;
     for (let x = 0; x <= w; x++) {
-        ctx.beginPath();
-        ctx.moveTo(x * T, 0);
-        ctx.lineTo(x * T, h * T);
-        ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x * T, 0); ctx.lineTo(x * T, h * T); ctx.stroke();
     }
     for (let y = 0; y <= h; y++) {
-        ctx.beginPath();
-        ctx.moveTo(0, y * T);
-        ctx.lineTo(w * T, y * T);
-        ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, y * T); ctx.lineTo(w * T, y * T); ctx.stroke();
+    }
+
+    // Use tile sheet as background pattern for floor if loaded
+    if (tileImg && tileImg.complete) {
+        // Draw select tile items from the sheet over the canvas
+        // E.g. use the desk/computer/plant tiles from the tileset
+        // This adds visual richness on top of our procedural tiles
     }
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   PIXEL CHARACTER RENDERER (canvas for each agent)
-   ═══════════════════════════════════════════════════════════════ */
-function drawPixelCharacter(canvas, role, facing = "down", frame = 0) {
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    const w = 32, h = 40;
-    canvas.width = w;
-    canvas.height = h;
-    ctx.clearRect(0, 0, w, h);
-
-    const c = CHAR_COLORS[role] || CHAR_COLORS.custom;
-    const bounce = frame % 2 === 0 ? 0 : -1;
-
-    // Shadow
-    ctx.fillStyle = "rgba(0,0,0,0.2)";
-    ctx.fillRect(6, 36, 20, 4);
-
-    // Body (shirt)
-    ctx.fillStyle = c.shirt;
-    ctx.fillRect(8, 18 + bounce, 16, 14);
-
-    // Arms
-    ctx.fillStyle = c.skin;
-    ctx.fillRect(4, 20 + bounce, 5, 10);
-    ctx.fillRect(23, 20 + bounce, 5, 10);
-
-    // Legs
-    ctx.fillStyle = "#2a2a4a";
-    ctx.fillRect(10, 32 + bounce, 5, 6);
-    ctx.fillRect(17, 32 + bounce, 5, 6);
-
-    // Shoes
-    ctx.fillStyle = "#1a1a3a";
-    ctx.fillRect(9, 36 + bounce, 6, 3);
-    ctx.fillRect(17, 36 + bounce, 6, 3);
-
-    // Head
-    ctx.fillStyle = c.skin;
-    ctx.fillRect(9, 4 + bounce, 14, 15);
-
-    // Hair
-    ctx.fillStyle = c.hair;
-    ctx.fillRect(8, 2 + bounce, 16, 7);
-    ctx.fillRect(7, 4 + bounce, 2, 6);
-    ctx.fillRect(23, 4 + bounce, 2, 6);
-
-    // Eyes
-    if (facing !== "up") {
-        ctx.fillStyle = "#fff";
-        ctx.fillRect(12, 10 + bounce, 3, 3);
-        ctx.fillRect(18, 10 + bounce, 3, 3);
-        ctx.fillStyle = "#1a1b2e";
-        const eyeOff = facing === "left" ? 0 : facing === "right" ? 2 : 1;
-        ctx.fillRect(12 + eyeOff, 11 + bounce, 2, 2);
-        ctx.fillRect(18 + eyeOff, 11 + bounce, 2, 2);
+/* ── Pixel furniture drawing helpers ─────────────────────────── */
+function drawDesk(ctx, x, y) {
+    const T = TILE;
+    // Desk surface
+    ctx.fillStyle = COLORS.desk;
+    ctx.fillRect(x + 2, y + T * 0.3, T * 1.6, T * 0.7);
+    ctx.fillStyle = COLORS.deskTop;
+    ctx.fillRect(x + 2, y + T * 0.2, T * 1.6, T * 0.15);
+    // Desk legs
+    ctx.fillStyle = "#4a3a2a";
+    ctx.fillRect(x + 4, y + T * 0.9, 3, T * 0.15);
+    ctx.fillRect(x + T * 1.3, y + T * 0.9, 3, T * 0.15);
+    // Monitor
+    ctx.fillStyle = COLORS.monitor;
+    ctx.fillRect(x + T * 0.35, y + 2, T * 0.8, T * 0.35);
+    // Screen glow
+    ctx.fillStyle = COLORS.monitorGlow;
+    ctx.fillRect(x + T * 0.42, y + 4, T * 0.65, T * 0.25);
+    // Code lines on screen
+    ctx.fillStyle = "#34d399";
+    ctx.fillRect(x + T * 0.48, y + 7, T * 0.25, 1);
+    ctx.fillStyle = "#f472b6";
+    ctx.fillRect(x + T * 0.48, y + 10, T * 0.4, 1);
+    ctx.fillStyle = "#60a5fa";
+    ctx.fillRect(x + T * 0.55, y + 13, T * 0.2, 1);
+    // Monitor stand
+    ctx.fillStyle = "#555";
+    ctx.fillRect(x + T * 0.6, y + T * 0.34, T * 0.3, T * 0.06);
+    ctx.fillRect(x + T * 0.68, y + T * 0.34, T * 0.12, T * 0.1);
+    // Keyboard
+    ctx.fillStyle = "#444";
+    ctx.fillRect(x + T * 0.4, y + T * 0.5, T * 0.6, T * 0.12);
+    ctx.fillStyle = "#555";
+    for (let i = 0; i < 4; i++) {
+        ctx.fillRect(x + T * 0.44 + i * T * 0.13, y + T * 0.52, T * 0.08, T * 0.03);
     }
-
-    // Mouth
-    if (facing !== "up") {
-        ctx.fillStyle = "#c97a6a";
-        ctx.fillRect(14, 15 + bounce, 4, 1);
-    }
-
-    // Collar
-    ctx.fillStyle = c.shirt;
-    ctx.fillRect(12, 17 + bounce, 8, 2);
+    // Chair
+    ctx.fillStyle = COLORS.chair;
+    ctx.fillRect(x + T * 0.25, y + T + T * 0.15, T * 1.0, T * 0.55);
+    ctx.fillStyle = "#5a5a7a";
+    ctx.fillRect(x + T * 0.35, y + T + T * 0.05, T * 0.8, T * 0.18);
+    // Chair wheels
+    ctx.fillStyle = "#333";
+    ctx.fillRect(x + T * 0.3, y + T + T * 0.68, T * 0.12, T * 0.06);
+    ctx.fillRect(x + T * 1.08, y + T + T * 0.68, T * 0.12, T * 0.06);
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   COMPUTE AGENT POSITIONS (seat them at desks)
-   ═══════════════════════════════════════════════════════════════ */
-function computeAgentPositions(agents) {
-    // Group by role
-    const byRole = {};
-    agents.forEach((a) => {
-        const r = a.role || "custom";
-        if (!byRole[r]) byRole[r] = [];
-        byRole[r].push(a);
+function drawPlant(ctx, x, y) {
+    const T = TILE;
+    // Pot
+    ctx.fillStyle = COLORS.plantPot;
+    ctx.fillRect(x + T * 0.25, y + T * 0.55, T * 0.5, T * 0.4);
+    ctx.fillStyle = "#9a7b5a";
+    ctx.fillRect(x + T * 0.2, y + T * 0.52, T * 0.6, T * 0.08);
+    // Soil
+    ctx.fillStyle = "#4a3520";
+    ctx.fillRect(x + T * 0.28, y + T * 0.55, T * 0.44, T * 0.06);
+    // Leaves (lush)
+    ctx.fillStyle = COLORS.plant;
+    ctx.fillRect(x + T * 0.1, y + T * 0.15, T * 0.8, T * 0.42);
+    ctx.fillStyle = "#4a9d6c";
+    ctx.fillRect(x + T * 0.2, y + T * 0.05, T * 0.6, T * 0.25);
+    ctx.fillStyle = "#5ab87c";
+    ctx.fillRect(x + T * 0.3, y + T * 0.0, T * 0.4, T * 0.15);
+    // Leaf detail
+    ctx.fillStyle = "#2d6b48";
+    ctx.fillRect(x + T * 0.15, y + T * 0.35, T * 0.15, T * 0.08);
+    ctx.fillRect(x + T * 0.65, y + T * 0.25, T * 0.15, T * 0.08);
+}
+
+function drawMeetingTable(ctx, x, y, w, h) {
+    const T = TILE;
+    // Table body
+    ctx.fillStyle = "#5c5040";
+    ctx.fillRect(x + 3, y + 3, w * T - 6, h * T - 6);
+    ctx.fillStyle = "#6e6352";
+    ctx.fillRect(x + 5, y + 5, w * T - 10, h * T - 10);
+    // Table highlight
+    ctx.fillStyle = "rgba(255,255,255,0.05)";
+    ctx.fillRect(x + 8, y + 8, w * T - 16, 3);
+    // Items on table
+    ctx.fillStyle = "#d4d4d8";
+    ctx.fillRect(x + T * 0.8, y + T * 0.5, 7, 9);
+    ctx.fillStyle = "#818cf8";
+    ctx.fillRect(x + T * 2.2, y + T * 0.6, 8, 6);
+    ctx.fillStyle = "#f472b6";
+    ctx.fillRect(x + T * 1.5, y + T * 1.2, 6, 6);
+    // Chairs around table
+    const chairColor = "#5a4a6a";
+    for (let i = 0; i < w; i++) {
+        // Top chairs
+        ctx.fillStyle = chairColor;
+        ctx.fillRect(x + i * T + T * 0.25, y - T * 0.3, T * 0.5, T * 0.35);
+        ctx.fillStyle = "#6a5a7a";
+        ctx.fillRect(x + i * T + T * 0.3, y - T * 0.35, T * 0.4, T * 0.1);
+        // Bottom chairs
+        ctx.fillStyle = chairColor;
+        ctx.fillRect(x + i * T + T * 0.25, y + h * T - T * 0.05, T * 0.5, T * 0.35);
+    }
+}
+
+function drawCoffeeMachine(ctx, x, y) {
+    const T = TILE;
+    ctx.fillStyle = "#4a3a2a";
+    ctx.fillRect(x + 4, y + 6, T - 8, T - 10);
+    ctx.fillStyle = "#3a2a1a";
+    ctx.fillRect(x + 6, y + 8, T - 12, T * 0.35);
+    // Cup
+    ctx.fillStyle = "#d4d4d8";
+    ctx.fillRect(x + T * 0.35, y + T * 0.6, T * 0.25, T * 0.25);
+    ctx.fillStyle = COLORS.coffee;
+    ctx.fillRect(x + T * 0.38, y + T * 0.63, T * 0.19, T * 0.12);
+    // Steam
+    ctx.fillStyle = "rgba(255,255,255,0.15)";
+    ctx.fillRect(x + T * 0.4, y + T * 0.45, 2, 6);
+    ctx.fillRect(x + T * 0.52, y + T * 0.4, 2, 6);
+    // Light
+    ctx.fillStyle = "#4ade80";
+    ctx.fillRect(x + T * 0.7, y + T * 0.2, 3, 3);
+}
+
+function drawWhiteboard(ctx, x, y, w) {
+    const T = TILE;
+    const bw = w * T;
+    ctx.fillStyle = "#3a3c55";
+    ctx.fillRect(x + 2, y + 4, bw - 4, T * 0.75);
+    ctx.fillStyle = COLORS.whiteboard;
+    ctx.fillRect(x + 5, y + 7, bw - 10, T * 0.6);
+    // Sticky notes
+    ctx.fillStyle = "#fbbf24";
+    ctx.fillRect(x + 10, y + 10, 8, 8);
+    ctx.fillStyle = "#f472b6";
+    ctx.fillRect(x + 22, y + 12, 8, 8);
+    ctx.fillStyle = "#34d399";
+    ctx.fillRect(x + 36, y + 9, 8, 8);
+    // Lines
+    ctx.fillStyle = "#818cf8";
+    ctx.fillRect(x + 50, y + 11, bw * 0.2, 1.5);
+    ctx.fillStyle = "#f97316";
+    ctx.fillRect(x + 50, y + 16, bw * 0.25, 1.5);
+    ctx.fillStyle = "#60a5fa";
+    ctx.fillRect(x + 50, y + 21, bw * 0.15, 1.5);
+}
+
+function drawBookshelf(ctx, x, y) {
+    const T = TILE;
+    ctx.fillStyle = "#5c4a3a";
+    ctx.fillRect(x + 2, y + 2, T - 4, T - 4);
+    ctx.fillStyle = "#4a3a2a";
+    ctx.fillRect(x + 4, y + 4, T - 8, T * 0.25);
+    ctx.fillRect(x + 4, y + T * 0.45, T - 8, T * 0.25);
+    // Books
+    const bookColors = ["#ef4444", "#3b82f6", "#22c55e", "#fbbf24", "#8b5cf6", "#f97316"];
+    bookColors.forEach((c, i) => {
+        const bx = x + 5 + i * 4;
+        ctx.fillStyle = c;
+        ctx.fillRect(bx, y + 5, 3, T * 0.2);
+        ctx.fillRect(bx, y + T * 0.47, 3, T * 0.2);
     });
+}
 
-    const positions = {};
-    Object.entries(byRole).forEach(([role, roleAgents]) => {
-        const zone = DEPT_ZONES[role] || DEPT_ZONES.custom;
-        if (!zone) {
-            // Place overflow agents in meeting area
-            roleAgents.forEach((a, i) => {
-                positions[a.id] = {
-                    x: (13 + i) * TILE + TILE / 2,
-                    y: 18 * TILE + TILE / 2,
-                };
+function drawLamp(ctx, x, y) {
+    const T = TILE;
+    // Glow
+    ctx.fillStyle = "rgba(251,191,36,0.08)";
+    ctx.beginPath();
+    ctx.arc(x + T / 2, y + T * 0.3, T * 0.6, 0, Math.PI * 2);
+    ctx.fill();
+    // Stand
+    ctx.fillStyle = "#555";
+    ctx.fillRect(x + T * 0.45, y + T * 0.35, T * 0.1, T * 0.55);
+    // Base
+    ctx.fillStyle = "#444";
+    ctx.fillRect(x + T * 0.3, y + T * 0.85, T * 0.4, T * 0.1);
+    // Shade
+    ctx.fillStyle = COLORS.lamp;
+    ctx.fillRect(x + T * 0.25, y + T * 0.15, T * 0.5, T * 0.25);
+    ctx.fillStyle = "#fcd34d";
+    ctx.fillRect(x + T * 0.3, y + T * 0.2, T * 0.4, T * 0.15);
+}
+
+function drawPrinter(ctx, x, y) {
+    const T = TILE;
+    ctx.fillStyle = "#555";
+    ctx.fillRect(x + 4, y + T * 0.3, T - 8, T * 0.5);
+    ctx.fillStyle = "#666";
+    ctx.fillRect(x + 6, y + T * 0.35, T - 12, T * 0.15);
+    // Paper
+    ctx.fillStyle = "#e4e4e4";
+    ctx.fillRect(x + T * 0.3, y + T * 0.15, T * 0.4, T * 0.2);
+    // Light
+    ctx.fillStyle = "#4ade80";
+    ctx.fillRect(x + T * 0.7, y + T * 0.55, 3, 3);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   AGENT POSITION & MOVEMENT SYSTEM
+   ═══════════════════════════════════════════════════════════════ */
+function getDeskPosition(agents, agentId) {
+    const agent = agents.find((a) => a.id === agentId);
+    if (!agent) return null;
+    const role = agent.role || "custom";
+    const zone = DEPT_ZONES[role];
+    if (!zone) return { x: 15 * TILE, y: 18 * TILE };
+
+    const roleAgents = agents.filter((a) => a.role === role);
+    const idx = roleAgents.findIndex((a) => a.id === agentId);
+    const desksPerRow = Math.floor(zone.w / 3);
+    const row = Math.floor(idx / desksPerRow);
+    const col = idx % desksPerRow;
+    return {
+        x: (zone.x + col * 3 + 1) * TILE + TILE * 0.5,
+        y: (zone.y + row * 3 + 2) * TILE + TILE * 0.2,
+    };
+}
+
+function useAgentMovement(agents, agentStatuses) {
+    const [positions, setPositions] = useState({});
+    const [states, setStates] = useState({}); // { agentId: { action, targetX, targetY, facing } }
+
+    // Initialize positions at desks
+    useEffect(() => {
+        const initPos = {};
+        const initState = {};
+        agents.forEach((a) => {
+            const desk = getDeskPosition(agents, a.id);
+            if (desk) {
+                initPos[a.id] = { x: desk.x, y: desk.y };
+                initState[a.id] = { action: "sitting", facing: "down", frame: 0 };
+            }
+        });
+        setPositions(initPos);
+        setStates(initState);
+    }, [agents]);
+
+    // Movement ticker — agents randomly walk to spots and return
+    useEffect(() => {
+        if (agents.length === 0) return;
+
+        const interval = setInterval(() => {
+            setStates((prev) => {
+                const next = { ...prev };
+                agents.forEach((a) => {
+                    const st = next[a.id];
+                    if (!st) return;
+                    const status = agentStatuses[a.id]?.status || "idle";
+
+                    if (st.action === "sitting") {
+                        // Random chance to get up and walk (only if idle)
+                        if (status === "idle" && Math.random() < 0.03) {
+                            const spot = WANDER_SPOTS[Math.floor(Math.random() * WANDER_SPOTS.length)];
+                            next[a.id] = {
+                                action: "walking",
+                                targetX: spot.x * TILE + TILE / 2,
+                                targetY: spot.y * TILE + TILE / 2,
+                                facing: "down",
+                                frame: 0,
+                                returnTimer: 80 + Math.floor(Math.random() * 60),
+                            };
+                        } else {
+                            next[a.id] = { ...st, frame: st.frame + 1 };
+                        }
+                    } else if (st.action === "walking") {
+                        // Move towards target
+                        setPositions((pp) => {
+                            const pos = pp[a.id];
+                            if (!pos) return pp;
+                            const dx = st.targetX - pos.x;
+                            const dy = st.targetY - pos.y;
+                            const dist = Math.sqrt(dx * dx + dy * dy);
+
+                            if (dist < 4) {
+                                // Arrived — stand around then return
+                                next[a.id] = {
+                                    action: "standing",
+                                    facing: "down",
+                                    frame: st.frame + 1,
+                                    returnTimer: st.returnTimer,
+                                };
+                                return pp;
+                            }
+
+                            const speed = 3;
+                            const nx = pos.x + (dx / dist) * speed;
+                            const ny = pos.y + (dy / dist) * speed;
+                            const facing = Math.abs(dx) > Math.abs(dy)
+                                ? (dx > 0 ? "right" : "left")
+                                : (dy > 0 ? "down" : "up");
+                            next[a.id] = { ...st, facing, frame: st.frame + 1 };
+
+                            return { ...pp, [a.id]: { x: nx, y: ny } };
+                        });
+                    } else if (st.action === "standing") {
+                        if (st.returnTimer <= 0) {
+                            // Walk back to desk
+                            const desk = getDeskPosition(agents, a.id);
+                            if (desk) {
+                                next[a.id] = {
+                                    action: "returning",
+                                    targetX: desk.x,
+                                    targetY: desk.y,
+                                    facing: "up",
+                                    frame: st.frame + 1,
+                                    returnTimer: 0,
+                                };
+                            }
+                        } else {
+                            next[a.id] = { ...st, returnTimer: st.returnTimer - 1, frame: st.frame + 1 };
+                        }
+                    } else if (st.action === "returning") {
+                        setPositions((pp) => {
+                            const pos = pp[a.id];
+                            if (!pos) return pp;
+                            const dx = st.targetX - pos.x;
+                            const dy = st.targetY - pos.y;
+                            const dist = Math.sqrt(dx * dx + dy * dy);
+
+                            if (dist < 4) {
+                                next[a.id] = { action: "sitting", facing: "down", frame: 0 };
+                                return { ...pp, [a.id]: { x: st.targetX, y: st.targetY } };
+                            }
+
+                            const speed = 3;
+                            const nx = pos.x + (dx / dist) * speed;
+                            const ny = pos.y + (dy / dist) * speed;
+                            const facing = Math.abs(dx) > Math.abs(dy)
+                                ? (dx > 0 ? "right" : "left")
+                                : (dy > 0 ? "down" : "up");
+                            next[a.id] = { ...st, facing, frame: st.frame + 1 };
+
+                            return { ...pp, [a.id]: { x: nx, y: ny } };
+                        });
+                    }
+                });
+                return next;
             });
-            return;
+        }, 80); // ~12 FPS movement
+
+        return () => clearInterval(interval);
+    }, [agents, agentStatuses]);
+
+    return { positions, states };
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SPRITE-BASED CHARACTER COMPONENT
+   ═══════════════════════════════════════════════════════════════ */
+function PixelCharSprite({ role, state, status }) {
+    const canvasRef = useRef(null);
+    const imgRef = useRef(null);
+    const [loaded, setLoaded] = useState(false);
+
+    // Load sprite sheet once
+    useEffect(() => {
+        const img = new Image();
+        img.src = CHAR_SHEET;
+        img.onload = () => {
+            imgRef.current = img;
+            setLoaded(true);
+        };
+    }, []);
+
+    // Determine which sprite frame to draw
+    const action = state?.action || "sitting";
+    const facing = state?.facing || "down";
+    const frame = state?.frame || 0;
+
+    useEffect(() => {
+        const canvas = canvasRef.current;
+        const img = imgRef.current;
+        if (!canvas || !img || !loaded) return;
+
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, SPRITE_W, SPRITE_H);
+
+        const row = ROLE_ROW[role] ?? ROLE_ROW.custom;
+
+        // Determine column based on action/facing
+        let col;
+        if (action === "sitting" && status === "in_progress") {
+            col = 5; // working
+        } else if (action === "walking" || action === "returning") {
+            // Alternate between walk frames
+            col = frame % 2 === 0 ? 0 : 1;
+            if (facing === "up") col = frame % 2 === 0 ? 2 : 3;
+            if (facing === "left" || facing === "right") col = 4;
+        } else {
+            col = 0; // front idle
         }
 
-        const desksPerRow = Math.floor(zone.w / 3);
-        roleAgents.forEach((a, i) => {
-            const row = Math.floor(i / desksPerRow);
-            const col = i % desksPerRow;
-            const dx = zone.x + col * 3 + 1;
-            const dy = zone.y + row * 3 + 2; // Sit at chair position
-            positions[a.id] = {
-                x: dx * TILE + TILE * 0.5,
-                y: dy * TILE + TILE * 0.2,
-            };
-        });
-    });
+        // Sprite sheet: 6 cols × 6 rows, each cell ~100px
+        const cellW = img.width / 6;
+        const cellH = img.height / 6;
+        const sx = col * cellW;
+        const sy = row * cellH;
 
-    return positions;
+        // Draw character from sprite sheet
+        ctx.save();
+        if (facing === "right") {
+            // Flip horizontally for right-facing
+        }
+        ctx.drawImage(img, sx, sy, cellW, cellH, 0, 0, SPRITE_W, SPRITE_H);
+
+        // If walking, add a bounce
+        if ((action === "walking" || action === "returning") && frame % 4 < 2) {
+            // Slight vertical offset already handled by position
+        }
+        ctx.restore();
+    }, [role, action, facing, frame, status, loaded]);
+
+    return (
+        <canvas
+            ref={canvasRef}
+            width={SPRITE_W}
+            height={SPRITE_H}
+            style={{
+                width: SPRITE_W,
+                height: SPRITE_H,
+                imageRendering: "pixelated",
+            }}
+        />
+    );
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -383,37 +655,27 @@ export default function PixelOffice() {
     const [chatInput, setChatInput] = useState("");
     const [selectedAgent, setSelectedAgent] = useState(null);
     const [speechBubbles, setSpeechBubbles] = useState({});
-    const [frame, setFrame] = useState(0);
 
-    // Animation frame ticker
-    useEffect(() => {
-        const interval = setInterval(() => setFrame((f) => f + 1), 600);
-        return () => clearInterval(interval);
-    }, []);
-
-    // Compute positions
-    const agentPositions = useMemo(() => computeAgentPositions(agents), [agents]);
+    // Movement system
+    const { positions, states } = useAgentMovement(agents, agentStatuses);
 
     // Draw the tilemap
     useEffect(() => {
         const canvas = canvasRef.current;
         if (!canvas) return;
         const ctx = canvas.getContext("2d");
-        canvas.width = MAP_W * TILE * scale;
-        canvas.height = MAP_H * TILE * scale;
-        drawTilemap(ctx, MAP_W, MAP_H, scale);
-    }, [scale]);
+        canvas.width = MAP_W * TILE;
+        canvas.height = MAP_H * TILE;
+        drawTilemap(ctx, MAP_W, MAP_H, null);
+    }, []);
 
-    // Draw zone labels on overlay
+    // Zone labels
     const zoneLabels = useMemo(() => {
-        const labels = [];
-        Object.entries(DEPT_ZONES).forEach(([role]) => {
-            const zone = DEPT_ZONES[role];
+        return Object.entries(DEPT_ZONES).map(([role, zone]) => {
             const cfg = DEPT_CONFIG[role] || DEPT_CONFIG.custom;
-            const agentsInZone = agents.filter((a) => a.role === role);
-            labels.push({ role, zone, cfg, count: agentsInZone.length });
+            const count = agents.filter((a) => a.role === role).length;
+            return { role, zone, cfg, count };
         });
-        return labels;
     }, [agents]);
 
     // Chat auto-scroll
@@ -421,20 +683,16 @@ export default function PixelOffice() {
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [teamOutput]);
 
-    // Show speech bubbles from team output
+    // Speech bubbles from team output
     useEffect(() => {
         if (!teamOutput || teamOutput.length === 0) return;
         const last = teamOutput[teamOutput.length - 1];
-        if (!last || !last.agent) return;
+        if (!last?.agent) return;
         const agent = agents.find((a) => a.name === last.agent);
         if (!agent) return;
-        setSpeechBubbles((prev) => ({ ...prev, [agent.id]: last.content?.slice(0, 40) }));
+        setSpeechBubbles((p) => ({ ...p, [agent.id]: last.content?.slice(0, 40) }));
         const timer = setTimeout(() => {
-            setSpeechBubbles((prev) => {
-                const next = { ...prev };
-                delete next[agent.id];
-                return next;
-            });
+            setSpeechBubbles((p) => { const n = { ...p }; delete n[agent.id]; return n; });
         }, 4000);
         return () => clearTimeout(timer);
     }, [teamOutput, agents]);
@@ -446,11 +704,8 @@ export default function PixelOffice() {
         setChatInput("");
     }, [chatInput, selectedProjectId, broadcastMessage]);
 
-    const getAgentStatus = (agentId) => agentStatuses[agentId]?.status || "idle";
-
-    const getAgentTask = (agentId) => {
-        return tasks.find((t) => t.assigned_agent_id === agentId && t.status !== "done");
-    };
+    const getStatus = (id) => agentStatuses[id]?.status || "idle";
+    const getTask = (id) => tasks.find((t) => t.assigned_agent_id === id && t.status !== "done");
 
     if (agents.length === 0) {
         return (
@@ -470,35 +725,31 @@ export default function PixelOffice() {
             <div className="pixel-office-map">
                 {/* Toolbar */}
                 <div className="pixel-toolbar">
-                    <button className="pixel-toolbar-btn" onClick={() => setScale((s) => Math.min(s + 0.25, 2))}
-                        title="Zoom In">
+                    <button className="pixel-toolbar-btn" onClick={() => setScale((s) => Math.min(s + 0.25, 2.5))} title="Zoom In">
                         <ZoomInOutlined />
                     </button>
-                    <button className="pixel-toolbar-btn" onClick={() => setScale((s) => Math.max(s - 0.25, 0.5))}
-                        title="Zoom Out">
+                    <button className="pixel-toolbar-btn" onClick={() => setScale((s) => Math.max(s - 0.25, 0.5))} title="Zoom Out">
                         <ZoomOutOutlined />
                     </button>
-                    <button className="pixel-toolbar-btn" onClick={() => setScale(1)} title="Reset Zoom">
+                    <button className="pixel-toolbar-btn" onClick={() => setScale(1)} title="Reset">
                         <FullscreenOutlined />
                     </button>
                     <div style={{
                         padding: "6px 10px", borderRadius: 8, fontSize: 10, fontWeight: 700,
                         background: "rgba(26,27,46,0.85)", color: "rgba(255,255,255,0.5)",
-                        border: "1px solid rgba(255,255,255,0.12)", fontFamily: '"JetBrains Mono", monospace',
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        fontFamily: '"JetBrains Mono", monospace',
                         backdropFilter: "blur(8px)",
                     }}>
                         👥 {agents.length} agents online
                     </div>
                 </div>
 
-                {/* Canvas tilemap */}
+                {/* Scrollable map container */}
                 <div style={{
-                    position: "absolute", inset: 0,
-                    overflow: "auto",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    padding: 40,
+                    position: "absolute", inset: 0, overflow: "auto",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    padding: 60,
                 }}>
                     <div style={{
                         position: "relative",
@@ -506,15 +757,15 @@ export default function PixelOffice() {
                         height: MAP_H * TILE * scale,
                         flexShrink: 0,
                     }}>
+                        {/* Tilemap canvas */}
                         <canvas
                             ref={canvasRef}
-                            className="pixel-tilemap"
-                            style={{ width: MAP_W * TILE * scale, height: MAP_H * TILE * scale }}
+                            style={{
+                                width: MAP_W * TILE * scale,
+                                height: MAP_H * TILE * scale,
+                                imageRendering: "pixelated",
+                            }}
                         />
-
-                        {/* Floor grid overlay */}
-                        <div className="pixel-floor-pattern"
-                            style={{ backgroundSize: `${TILE * scale}px ${TILE * scale}px` }} />
 
                         {/* Zone labels */}
                         {zoneLabels.map(({ role, zone, cfg, count }) => (
@@ -524,7 +775,7 @@ export default function PixelOffice() {
                                 width: zone.w * TILE * scale,
                                 height: zone.h * TILE * scale,
                                 borderColor: cfg.color + "30",
-                                background: cfg.bg,
+                                background: "transparent",
                             }}>
                                 <div className="pixel-zone-label" style={{
                                     background: cfg.color + "18",
@@ -542,45 +793,55 @@ export default function PixelOffice() {
 
                         {/* Agent sprites */}
                         {agents.map((agent) => {
-                            const pos = agentPositions[agent.id];
+                            const pos = positions[agent.id];
                             if (!pos) return null;
-                            const status = getAgentStatus(agent.id);
-                            const currentTask = getAgentTask(agent.id);
+                            const status = getStatus(agent.id);
+                            const state = states[agent.id] || { action: "sitting", facing: "down", frame: 0 };
+                            const currentTask = getTask(agent.id);
                             const bubble = speechBubbles[agent.id];
+                            const isWalking = state.action === "walking" || state.action === "returning";
 
                             return (
                                 <div
                                     key={agent.id}
-                                    className={`pixel-agent ${status}`}
+                                    className={`pixel-agent ${isWalking ? "walking" : status}`}
                                     style={{
-                                        left: pos.x * scale - 16 * scale,
-                                        top: pos.y * scale - 20 * scale,
+                                        left: pos.x * scale - (SPRITE_W / 2) * scale,
+                                        top: pos.y * scale - (SPRITE_H / 2) * scale,
                                         transform: `scale(${scale})`,
                                         transformOrigin: "top left",
+                                        transition: isWalking ? "none" : "left 0.3s ease, top 0.3s ease",
                                     }}
                                     onClick={() => setSelectedAgent(selectedAgent === agent.id ? null : agent.id)}
                                 >
                                     {/* Speech bubble */}
-                                    {bubble && (
-                                        <div className="pixel-bubble">{bubble}…</div>
-                                    )}
+                                    {bubble && <div className="pixel-bubble">{bubble}…</div>}
 
-                                    {/* Pixel character */}
-                                    <div className="pixel-agent-body">
-                                        <PixelCharCanvas role={agent.role} frame={frame} />
+                                    {/* Character sprite */}
+                                    <div className="pixel-agent-body" style={{
+                                        width: SPRITE_W, height: SPRITE_H,
+                                        transform: state.facing === "right" ? "scaleX(-1)" : "none",
+                                    }}>
+                                        <PixelCharSprite role={agent.role} state={state} status={status} />
                                         <div className={`pixel-agent-status ${status}`} />
                                     </div>
 
-                                    {/* Name tag */}
-                                    <div className="pixel-agent-name">
-                                        {agent.name}
-                                    </div>
+                                    {/* Name */}
+                                    <div className="pixel-agent-name">{agent.name}</div>
 
-                                    {/* Agent info tooltip */}
-                                    {selectedAgent === agent.id && (
-                                        <div className="pixel-agent-tooltip" style={{
-                                            left: 40, top: -10,
+                                    {/* Status label */}
+                                    {isWalking && (
+                                        <div style={{
+                                            fontSize: 8, color: "#818cf8", fontFamily: '"JetBrains Mono", monospace',
+                                            fontWeight: 600, textAlign: "center", marginTop: 1,
                                         }}>
+                                            {state.action === "returning" ? "↩ returning" : "🚶 walking"}
+                                        </div>
+                                    )}
+
+                                    {/* Info tooltip */}
+                                    {selectedAgent === agent.id && (
+                                        <div className="pixel-agent-tooltip" style={{ left: 42, top: -10 }}>
                                             <div style={{ fontSize: 12, fontWeight: 700, color: "#fff", marginBottom: 6 }}>
                                                 {(DEPT_CONFIG[agent.role] || DEPT_CONFIG.custom).emoji} {agent.name}
                                             </div>
@@ -588,10 +849,16 @@ export default function PixelOffice() {
                                                 Role: <span style={{ color: (DEPT_CONFIG[agent.role] || DEPT_CONFIG.custom).color }}>{agent.role}</span>
                                             </div>
                                             <div style={{ fontSize: 10, color: "rgba(255,255,255,0.6)", marginBottom: 4 }}>
-                                                Status: <span style={{ color: status === "in_progress" ? "#818cf8" : status === "idle" ? "#64748b" : "#fbbf24" }}>{status.replace("_", " ")}</span>
+                                                Status: <span style={{ color: status === "in_progress" ? "#818cf8" : "#64748b" }}>{status.replace("_", " ")}</span>
+                                            </div>
+                                            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", marginBottom: 4 }}>
+                                                {isWalking ? "🚶 On a break" : state.action === "standing" ? "☕ At coffee" : "💻 At desk"}
                                             </div>
                                             {currentTask && (
-                                                <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", marginTop: 4, borderTop: "1px solid rgba(255,255,255,0.1)", paddingTop: 4 }}>
+                                                <div style={{
+                                                    fontSize: 10, color: "rgba(255,255,255,0.5)",
+                                                    borderTop: "1px solid rgba(255,255,255,0.1)", paddingTop: 4, marginTop: 4,
+                                                }}>
                                                     📋 {currentTask.title}
                                                 </div>
                                             )}
@@ -634,9 +901,13 @@ export default function PixelOffice() {
                                     <div className="pixel-chat-content">
                                         <div className="pixel-chat-sender" style={{ color: roleCfg.color }}>
                                             {entry.agent || "System"}
-                                            <span className="time">{entry.ts ? new Date(entry.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}</span>
+                                            <span className="time">
+                                                {entry.ts ? new Date(entry.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}
+                                            </span>
                                         </div>
-                                        <div className="pixel-chat-text">{entry.content || entry.text || JSON.stringify(entry)}</div>
+                                        <div className="pixel-chat-text">
+                                            {entry.content || entry.text || JSON.stringify(entry)}
+                                        </div>
                                     </div>
                                 </div>
                             );
@@ -658,25 +929,5 @@ export default function PixelOffice() {
                 </div>
             </div>
         </div>
-    );
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   PIXEL CHARACTER CANVAS (individual agent sprite)
-   ═══════════════════════════════════════════════════════════════ */
-function PixelCharCanvas({ role, frame }) {
-    const canvasRef = useRef(null);
-
-    useEffect(() => {
-        drawPixelCharacter(canvasRef.current, role, "down", frame);
-    }, [role, frame]);
-
-    return (
-        <canvas
-            ref={canvasRef}
-            width={32}
-            height={40}
-            style={{ width: 32, height: 40, imageRendering: "pixelated" }}
-        />
     );
 }

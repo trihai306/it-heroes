@@ -19,8 +19,6 @@ from routers.system import router as system_router
 from routers.office_layouts import router as office_layouts_router
 from websocket.manager import ConnectionManager
 from websocket.events import WSEvent
-from services.agent_orchestrator import AgentOrchestrator
-from services.team_manager import TeamManager
 from services.unified_orchestrator import UnifiedTeamOrchestrator
 
 # ─── Logging ───────────────────────────────────────────────────────────
@@ -43,7 +41,6 @@ async def lifespan(app: FastAPI):
     yield
     # Graceful shutdown: stop all agents
     logger.info("👋 Shutting down...")
-    await orchestrator.claude.stop_all()
     await unified_orchestrator.shutdown_all()
     logger.info("✅ All agent sessions stopped")
 
@@ -64,10 +61,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Shared WebSocket manager + Orchestrator singletons
+# Shared WebSocket manager + Orchestrator singleton
 ws_manager = ConnectionManager()
-orchestrator = AgentOrchestrator(ws_manager)
-team_manager = TeamManager(ws_manager)
 unified_orchestrator = UnifiedTeamOrchestrator(ws_manager)
 
 # ─── REST Routers ──────────────────────────────────────────────────────

@@ -19,6 +19,7 @@ export default function useWebSocket(projectId) {
 
     const updateAgentStatus = useAgentStore((s) => s.updateAgentStatus);
     const fetchAgents = useAgentStore((s) => s.fetchAgents);
+    const appendTeamOutput = useAgentStore((s) => s.appendTeamOutput);
     const handleTaskEvent = useTaskStore((s) => s.handleTaskEvent);
 
     const addLog = useCallback((log) => {
@@ -53,14 +54,17 @@ export default function useWebSocket(projectId) {
                         case "task.updated":
                             handleTaskEvent(msg.data);
                             break;
-                        case "log.append":
-                            addLog({
+                        case "log.append": {
+                            const logEntry = {
                                 ts: msg.ts,
                                 level: msg.data.level || "info",
                                 agent_id: msg.data.agent_id,
                                 message: msg.data.message,
-                            });
+                            };
+                            addLog(logEntry);
+                            appendTeamOutput(logEntry);
                             break;
+                        }
                         case "qa.status":
                             addLog({
                                 ts: msg.ts,
@@ -131,6 +135,39 @@ export default function useWebSocket(projectId) {
                                 message: msg.data.message,
                             });
                             break;
+                        case "team.inbox_message": {
+                            const inboxEntry = {
+                                ts: msg.ts,
+                                level: "info",
+                                agent_id: msg.data.agent_id,
+                                message: `[inbox] ${msg.data.from}: ${msg.data.text}`,
+                            };
+                            addLog(inboxEntry);
+                            appendTeamOutput(inboxEntry);
+                            break;
+                        }
+                        case "team.config_changed":
+                            addLog({
+                                ts: msg.ts,
+                                level: "info",
+                                message: "Team config updated",
+                            });
+                            if (projectId) fetchAgents(projectId);
+                            break;
+                        case "claude.task_created":
+                            addLog({
+                                ts: msg.ts,
+                                level: "info",
+                                message: `Claude task created: ${msg.data.subject || msg.data.task_id || ""}`,
+                            });
+                            break;
+                        case "claude.task_updated":
+                            addLog({
+                                ts: msg.ts,
+                                level: "info",
+                                message: `Claude task updated: ${msg.data.subject || msg.data.task_id || ""} → ${msg.data.status || ""}`,
+                            });
+                            break;
                         case "connected":
                             addLog({
                                 ts: new Date().toISOString(),
@@ -171,7 +208,7 @@ export default function useWebSocket(projectId) {
             }
             setConnected(false);
         };
-    }, [projectId, updateAgentStatus, fetchAgents, handleTaskEvent, addLog]);
+    }, [projectId, updateAgentStatus, fetchAgents, appendTeamOutput, handleTaskEvent, addLog]);
 
     return { connected, logs, clearLogs: () => setLogs([]) };
 }

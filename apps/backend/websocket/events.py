@@ -23,6 +23,12 @@ EVENT_TEAM_AGENT_COMPLETED = "team.agent_completed"
 EVENT_TEAM_TASK_DELEGATED = "team.task_delegated"
 EVENT_TEAM_MESSAGE = "team.message"
 
+# File watcher events (from ~/.claude/teams/ monitoring)
+EVENT_TEAM_INBOX_MESSAGE = "team.inbox_message"
+EVENT_TEAM_CONFIG_CHANGED = "team.config_changed"
+EVENT_CLAUDE_TASK_CREATED = "claude.task_created"
+EVENT_CLAUDE_TASK_UPDATED = "claude.task_updated"
+
 
 @dataclass
 class WSEvent:

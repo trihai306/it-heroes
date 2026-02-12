@@ -1,19 +1,13 @@
-"""Teams router — Unified Agent Teams management endpoints.
+"""Teams router — CLI Agent Teams management endpoints."""
 
-Supports both:
-- Unified orchestrator (SDK subagents + CLI fallback)
-- Legacy team manager (backward compat)
-"""
-
-import asyncio
 import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from database import get_session
 from models.project import Project
-from models.agent import Agent, AgentRole, AgentStatus
+from models.agent import Agent, AgentStatus
 from models.task import Task
 
 logger = logging.getLogger(__name__)
@@ -27,7 +21,7 @@ class CreateTeamRequest(BaseModel):
     """Create a team with one natural language prompt."""
     prompt: str
     team_name: str = "chibi-team"
-    model: str = "claude-sonnet-4-5-20250929"
+    model: str = ""
 
 
 class CreateFromPresetRequest(BaseModel):
@@ -58,24 +52,12 @@ class BroadcastRequest(BaseModel):
     message: str
 
 
-class AddTeammateRequest(BaseModel):
-    """Request to add a teammate via prompt."""
-    prompt: str
-
-
 # ─── Helpers ──────────────────────────────────────────────────────────
 
-def _get_unified_orchestrator():
+def _get_orchestrator():
     """Lazy import unified orchestrator singleton."""
     from main import unified_orchestrator
     return unified_orchestrator
-
-
-def _get_team_manager():
-    """Lazy import legacy team manager singleton."""
-    from main import team_manager
-    return team_manager
-
 
 
 def _get_project(db: Session, project_id: int) -> Project:
@@ -86,7 +68,7 @@ def _get_project(db: Session, project_id: int) -> Project:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# UNIFIED ENDPOINTS (new)
+# TEAM LIFECYCLE
 # ═══════════════════════════════════════════════════════════════════════
 
 @router.post("/create-from-preset")
@@ -95,13 +77,9 @@ async def create_team_from_preset(
     body: CreateFromPresetRequest,
     db: Session = Depends(get_session),
 ):
-    """
-    Create a team from a predefined preset (fullstack, research, review, debug).
-
-    Creates all agent records, worktrees, and initializes the team.
-    """
+    """Create a team from a predefined preset using CLI Agent Teams."""
     project = _get_project(db, project_id)
-    orch = _get_unified_orchestrator()
+    orch = _get_orchestrator()
 
     result = await orch.create_team_from_preset(
         db=db,
@@ -114,7 +92,6 @@ async def create_team_from_preset(
 
     if "error" in result:
         raise HTTPException(400, result["error"])
-
     return result
 
 
@@ -124,13 +101,9 @@ async def create_team_from_prompt(
     body: CreateTeamRequest,
     db: Session = Depends(get_session),
 ):
-    """
-    Create a team from a natural language prompt.
-
-    The lead agent analyzes the prompt and delegates to subagents.
-    """
+    """Create a team from a natural language prompt using CLI Agent Teams."""
     project = _get_project(db, project_id)
-    orch = _get_unified_orchestrator()
+    orch = _get_orchestrator()
 
     result = await orch.create_team_from_prompt(
         db=db,
@@ -143,7 +116,6 @@ async def create_team_from_prompt(
 
     if "error" in result:
         raise HTTPException(400, result["error"])
-
     return result
 
 
@@ -152,13 +124,9 @@ async def dispatch_tasks(
     project_id: int,
     db: Session = Depends(get_session),
 ):
-    """
-    Auto-assign pending tasks to agents and start them.
-
-    Uses TaskDispatcher to match tasks to agents by role.
-    """
+    """Dispatch pending tasks to teammates via the lead agent."""
     project = _get_project(db, project_id)
-    orch = _get_unified_orchestrator()
+    orch = _get_orchestrator()
 
     started = await orch.dispatch_tasks(
         db=db,
@@ -166,7 +134,6 @@ async def dispatch_tasks(
         repo_path=project.repo_path,
         project_name=project.name,
     )
-
     return {"started": started, "count": len(started)}
 
 
@@ -187,43 +154,34 @@ async def start_agent(
     if not task or task.project_id != project_id:
         raise HTTPException(404, "Task not found in this project")
 
-    orch = _get_unified_orchestrator()
+    orch = _get_orchestrator()
     session = await orch.start_agent_on_task(
-        db=db,
-        agent=agent,
-        task=task,
-        project_name=project.name,
-        repo_path=project.repo_path,
+        db=db, agent=agent, task=task,
+        project_name=project.name, repo_path=project.repo_path,
     )
 
     return {
         "agent_id": agent.id,
         "task_id": task.id,
-        "session_status": session.status.value,
+        "session_status": session.status.value if session else "none",
     }
 
 
 @router.post("/stop-agent")
 async def stop_agent(
     project_id: int,
-    body: StartAgentRequest,  # reuse — just needs agent_id
+    body: StartAgentRequest,
     db: Session = Depends(get_session),
 ):
-    """Stop a specific agent."""
+    """Stop a specific agent by messaging the lead."""
     agent = db.get(Agent, body.agent_id)
     if not agent or agent.project_id != project_id:
         raise HTTPException(404, "Agent not found in this project")
 
-    orch = _get_unified_orchestrator()
-
-    # Cancel agent monitor (gracefully stops the running query)
-    monitor = orch._agent_monitors.pop(agent.id, None)
-    if monitor and not monitor.done():
-        monitor.cancel()
-        try:
-            await monitor
-        except asyncio.CancelledError:
-            pass
+    orch = _get_orchestrator()
+    result = await orch.send_command_to_lead(
+        project_id, f"Ask teammate {agent.name} to shut down"
+    )
 
     agent.status = AgentStatus.IDLE
     db.add(agent)
@@ -232,224 +190,95 @@ async def stop_agent(
     return {"stopped": True, "agent_id": agent.id}
 
 
-@router.get("/output")
-async def get_team_output(
-    project_id: int,
-    agent_id: int = 0,
-    last_n: int = 50,
-):
-    """
-    Get output lines. If agent_id is provided, get per-agent output.
-    Otherwise returns lead session output.
-    """
-    # For now, use legacy team manager output
-    tm = _get_team_manager()
-    output = tm.get_agent_output(last_n)
-    return {"output": output, "count": len(output)}
-
-
-@router.get("/prerequisites")
-async def check_prerequisites():
-    """Check if required tools (SDK, CLI) are available."""
-    orch = _get_unified_orchestrator()
-    return await orch.check_prerequisites()
-
-
 # ═══════════════════════════════════════════════════════════════════════
-# SHARED ENDPOINTS (work with both unified + legacy)
+# COMMUNICATION
 # ═══════════════════════════════════════════════════════════════════════
-
-@router.get("/presets")
-async def get_team_presets():
-    """Get predefined team configurations from team_presets.py."""
-    orch = _get_unified_orchestrator()
-    return {"presets": orch.get_presets()}
-
-
-@router.get("")
-async def get_team_status(
-    project_id: int,
-    db: Session = Depends(get_session),
-):
-    """Get current team configuration and status."""
-    orch = _get_unified_orchestrator()
-    return orch.get_team_status(db, project_id)
-
 
 @router.post("/command")
-async def send_command(
-    project_id: int,
-    body: SendCommandRequest,
-):
+async def send_command(project_id: int, body: SendCommandRequest):
     """Send a command to the lead agent."""
-    orch = _get_unified_orchestrator()
+    orch = _get_orchestrator()
     result = await orch.send_command_to_lead(project_id, body.message)
-
     if "error" in result:
-        # Fallback to legacy team manager
-        tm = _get_team_manager()
-        result = await tm.send_to_lead(body.message)
-        if "error" in result:
-            raise HTTPException(400, result["error"])
-
+        raise HTTPException(400, result["error"])
     return result
 
 
 @router.post("/message")
-async def send_message(
-    project_id: int,
-    body: MessageRequest,
-):
+async def send_message(project_id: int, body: MessageRequest):
     """Send a message to a specific teammate."""
-    orch = _get_unified_orchestrator()
+    orch = _get_orchestrator()
     result = await orch.send_message(project_id, body.to_agent_name, body.message)
-
     if "error" in result:
         raise HTTPException(400, result["error"])
-
     return result
 
 
 @router.post("/broadcast")
-async def broadcast_message(
-    project_id: int,
-    body: BroadcastRequest,
-):
+async def broadcast_message(project_id: int, body: BroadcastRequest):
     """Broadcast a message to all teammates."""
-    orch = _get_unified_orchestrator()
+    orch = _get_orchestrator()
     result = await orch.broadcast_message(project_id, body.message)
     return result
 
 
 @router.post("/cleanup")
-async def cleanup_team(
-    project_id: int,
-    db: Session = Depends(get_session),
-):
+async def cleanup_team(project_id: int, db: Session = Depends(get_session)):
     """Clean up the entire team — stop all agents, remove from DB."""
-    orch = _get_unified_orchestrator()
-    result = await orch.cleanup_team(db, project_id)
-
-    # Also cleanup legacy team manager
-    try:
-        tm = _get_team_manager()
-        await tm.cleanup_team()
-    except Exception:
-        pass
-
-    return result
+    orch = _get_orchestrator()
+    return await orch.cleanup_team(db, project_id)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LEGACY ENDPOINTS (backward compat with old TeamManager)
+# STATUS & CONFIG
 # ═══════════════════════════════════════════════════════════════════════
 
-@router.post("")
-async def create_team_legacy(
-    project_id: int,
-    body: CreateTeamRequest,
-    db: Session = Depends(get_session),
-):
-    """
-    Legacy: Create a team via old TeamManager.
-    Prefer /create-from-preset or /create-from-prompt instead.
-    """
-    project = _get_project(db, project_id)
-
-    # Remove existing agents
-    existing = db.exec(select(Agent).where(Agent.project_id == project_id)).all()
-    for agent in existing:
-        db.delete(agent)
-
-    lead = Agent(
-        project_id=project_id,
-        name="Lead Agent",
-        role=AgentRole.LEAD,
-        avatar_key="lead",
-        system_prompt="",
-        model=body.model,
-        is_lead=True,
-        team_name=body.team_name,
-        status=AgentStatus.IDLE,
-    )
-    db.add(lead)
-    db.commit()
-    db.refresh(lead)
+@router.get("")
+async def get_team_status(project_id: int, db: Session = Depends(get_session)):
+    """Get current team configuration and status."""
+    orch = _get_orchestrator()
+    return orch.get_team_status(db, project_id)
 
 
-    tm = _get_team_manager()
-    try:
-        team_result = await tm.create_team(
-            team_name=body.team_name,
-            project_id=project_id,
-            working_dir=project.repo_path,
-            prompt=body.prompt,
-            model=body.model,
-        )
-    except Exception as e:
-        logger.error(f"Failed to start lead session: {e}")
-        team_result = {"error": str(e)}
-
-    return {
-        "team_name": body.team_name,
-        "lead": {"id": lead.id, "name": lead.name},
-        "session_result": team_result,
-    }
+@router.get("/presets")
+async def get_team_presets():
+    """Get predefined team configurations."""
+    orch = _get_orchestrator()
+    return {"presets": orch.get_presets()}
 
 
-@router.post("/teammates")
-async def add_teammate(
-    project_id: int,
-    body: AddTeammateRequest,
-):
-    """Add a teammate by sending a prompt to the lead."""
-    tm = _get_team_manager()
-    result = await tm.send_to_lead(body.prompt)
-
-    if "error" in result:
-        raise HTTPException(400, result["error"])
-
-    return result
+@router.get("/prerequisites")
+async def check_prerequisites():
+    """Check if Claude CLI is available."""
+    orch = _get_orchestrator()
+    return await orch.check_prerequisites()
 
 
-@router.delete("/teammates/{agent_id}")
-async def remove_teammate(
-    project_id: int,
-    agent_id: int,
-    db: Session = Depends(get_session),
-):
-    """Remove a teammate."""
-    agent = db.get(Agent, agent_id)
-    if not agent or agent.project_id != project_id:
-        raise HTTPException(404, "Agent not found in this project")
-
-    if agent.is_lead:
-        raise HTTPException(400, "Cannot remove the lead agent. Use cleanup instead.")
-
-    tm = _get_team_manager()
-    await tm.stop_teammate(agent.name)
-
-    db.delete(agent)
-    db.commit()
-
-    return {"removed": True, "agent_name": agent.name}
+@router.get("/inboxes")
+async def get_team_inboxes(project_id: int):
+    """Get all inbox messages for the active team from ~/.claude/teams/."""
+    orch = _get_orchestrator()
+    state = orch._teams.get(project_id)
+    if not state or not state.file_watcher:
+        return {"inboxes": {}}
+    return {"inboxes": state.file_watcher.read_all_inboxes()}
 
 
-# ─── Utilities ───────────────────────────────────────────────────────
+@router.get("/config")
+async def get_team_config(project_id: int):
+    """Get the Claude Code team config.json from ~/.claude/teams/."""
+    orch = _get_orchestrator()
+    state = orch._teams.get(project_id)
+    if not state or not state.file_watcher:
+        return {"config": None}
+    return {"config": state.file_watcher.read_config()}
 
-def _agent_to_dict(agent: Agent) -> dict:
-    return {
-        "id": agent.id,
-        "project_id": agent.project_id,
-        "name": agent.name,
-        "role": agent.role.value,
-        "avatar_key": agent.avatar_key,
-        "status": agent.status.value,
-        "system_prompt": agent.system_prompt,
-        "model": agent.model,
-        "team_name": agent.team_name,
-        "is_lead": agent.is_lead,
-        "parent_agent_id": agent.parent_agent_id,
-        "sdk_agent_key": agent.sdk_agent_key,
-        "created_at": agent.created_at.isoformat(),
-    }
+
+@router.get("/tasks")
+async def get_claude_tasks(project_id: int):
+    """Get tasks from the Claude Code shared task list (~/.claude/tasks/)."""
+    orch = _get_orchestrator()
+    state = orch._teams.get(project_id)
+    if not state or not state.file_watcher:
+        return {"tasks": []}
+    return {"tasks": state.file_watcher.read_tasks()}

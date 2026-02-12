@@ -214,3 +214,59 @@ def get_preset_summary() -> list[dict]:
         }
         for pid, preset in TEAM_PRESETS.items()
     ]
+
+
+# ─── Prompt Translation (Preset → Natural Language for CLI Agent Teams) ───
+
+
+def build_team_creation_prompt(preset_id: str, project_context: str = "") -> str:
+    """Convert a preset into a natural language prompt that tells Claude CLI
+    to create an agent team with specific teammates.
+
+    This is the bridge between our preset system and real CLI Agent Teams.
+    """
+    preset = TEAM_PRESETS.get(preset_id)
+    if not preset:
+        raise ValueError(f"Unknown preset: {preset_id}")
+
+    # Build teammate descriptions from the preset
+    teammate_lines = []
+    for key, agent_cfg in preset["agents"].items():
+        db_agent = next(
+            (a for a in preset["db_agents"] if a.get("sdk_agent_key") == key),
+            None,
+        )
+        name = db_agent["name"].lower().replace(" ", "-") if db_agent else key
+        role_desc = agent_cfg["description"]
+        teammate_lines.append(f"- **{name}**: {role_desc}")
+
+    teammates_block = "\n".join(teammate_lines)
+    num_teammates = len(preset["agents"])
+
+    prompt = (
+        f"Create an agent team with {num_teammates} teammates.\n\n"
+        f"{preset['lead_prompt']}\n\n"
+        f"Create these specific teammates:\n"
+        f"{teammates_block}\n\n"
+    )
+    if project_context:
+        prompt += f"Project context: {project_context}\n\n"
+    prompt += (
+        "After creating the team, wait for my instructions. "
+        "Do NOT start working on any tasks yet — "
+        "just confirm the team is ready and list each teammate's name and role."
+    )
+    return prompt
+
+
+def build_custom_team_prompt(user_prompt: str, team_name: str = "custom-team") -> str:
+    """Wrap a user's custom prompt with team creation instructions."""
+    return (
+        f"Analyze the following request and create an appropriate agent team to accomplish it.\n"
+        f"Choose the right number of teammates (1-5) based on task complexity.\n"
+        f"For each teammate, pick a descriptive name, give them a focused role, "
+        f"and provide a clear prompt describing their responsibilities.\n\n"
+        f"The request:\n{user_prompt}\n\n"
+        f"After creating the team, coordinate the work among your teammates. "
+        f"Delegate tasks as appropriate and synthesize results when everyone finishes."
+    )

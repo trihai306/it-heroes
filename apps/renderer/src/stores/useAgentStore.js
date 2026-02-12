@@ -1,5 +1,5 @@
 /**
- * Zustand store for agent & team management.
+ * Zustand store for agent & team management — CLI Agent Teams.
  */
 import { create } from "zustand";
 import agentService from "../services/agentService";
@@ -10,12 +10,12 @@ const useAgentStore = create((set, get) => ({
     agentStatuses: {}, // agent_id -> { status, lastSeen }
     agentPositions: {}, // agent_id -> { x, z, facing_angle, is_walking, status }
     teamConfig: null, // Current team configuration
-    teamSessions: null, // Live session status
     teamOutput: [], // Output lines from lead session
     loading: false,
     presets: [], // Team presets from server
 
-    // Actions — Legacy (keep backward compat)
+    // ── Agent Queries ────────────────────────────────────────────────
+
     fetchAgents: async (projectId) => {
         set({ loading: true });
         try {
@@ -54,7 +54,7 @@ const useAgentStore = create((set, get) => ({
         set({ agentPositions: {} });
     },
 
-    // ── Team Management (new) ──────────────────────────────────────
+    // ── Team Management (CLI Agent Teams) ────────────────────────────
 
     fetchPresets: async () => {
         try {
@@ -128,22 +128,6 @@ const useAgentStore = create((set, get) => ({
         }
     },
 
-    // Legacy compat
-    createTeam: async (projectId, prompt, teamName = "chibi-team", model = "claude-sonnet-4-5-20250929") => {
-        set({ loading: true });
-        try {
-            const data = await agentService.createTeam(projectId, { prompt, teamName, model });
-            set({
-                teamConfig: data,
-                loading: false,
-            });
-            return data;
-        } catch (err) {
-            set({ loading: false });
-            throw err;
-        }
-    },
-
     fetchTeamStatus: async (projectId) => {
         try {
             const data = await agentService.teamStatus(projectId);
@@ -154,23 +138,6 @@ const useAgentStore = create((set, get) => ({
             return data;
         } catch {
             return null;
-        }
-    },
-
-    addTeammate: async (projectId, prompt) => {
-        try {
-            return await agentService.addTeammate(projectId, prompt);
-        } catch {
-            return null;
-        }
-    },
-
-    removeTeammate: async (projectId, agentId) => {
-        try {
-            await agentService.removeTeammate(projectId, agentId);
-            set((s) => ({ agents: s.agents.filter((a) => a.id !== agentId) }));
-        } catch {
-            // ignore
         }
     },
 
@@ -198,16 +165,6 @@ const useAgentStore = create((set, get) => ({
         }
     },
 
-    fetchTeamOutput: async (projectId, lastN = 50) => {
-        try {
-            const data = await agentService.output(projectId, lastN);
-            set({ teamOutput: data.output || [] });
-            return data.output;
-        } catch {
-            return [];
-        }
-    },
-
     appendTeamOutput: (entry) => {
         set((s) => ({
             teamOutput: [...(s.teamOutput || []), entry].slice(-200),
@@ -224,17 +181,11 @@ const useAgentStore = create((set, get) => ({
                 agentPositions: {},
                 teamOutput: [],
                 teamConfig: null,
-                teamSessions: null,
                 loading: false,
             });
         } catch {
             set({ loading: false });
         }
-    },
-
-    // Legacy compat
-    disbandTeam: async (projectId) => {
-        return get().cleanupTeam(projectId);
     },
 
     updateAgentStatus: (agentId, status) => {

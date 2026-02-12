@@ -1,5 +1,5 @@
 /**
- * Agent & Team API service.
+ * Agent & Team API service — CLI Agent Teams only.
  */
 import api from "./api";
 
@@ -12,7 +12,7 @@ const agentService = {
     /** Update agent (rules, name, etc.) */
     update: (agentId, data) => api.patch(`/agents/${agentId}`, data),
 
-    /* ── Unified Team Management (new) ───────────────────── */
+    /* ── Team Management (CLI Agent Teams) ─────────────── */
 
     /** Get team presets (from team_presets.py) */
     presets: (projectId = 1) => api.get(`/projects/${projectId}/teams/presets`),
@@ -50,34 +50,16 @@ const agentService = {
             task_id: 0,
         }),
 
-    /** Check prerequisites (SDK, CLI available) */
+    /** Check prerequisites (CLI available) */
     checkPrerequisites: (projectId = 1) =>
         api.get(`/projects/${projectId}/teams/prerequisites`),
 
     /** Get full team status */
     teamStatus: (projectId) => api.get(`/projects/${projectId}/teams`),
 
-    /** Get agent/team output */
-    getAgentOutput: (projectId, agentId = 0, lastN = 50) =>
-        api.get(`/projects/${projectId}/teams/output?agent_id=${agentId}&last_n=${lastN}`),
-
-    /* ── Legacy Team Management (backward compat) ──────── */
-
-    /** Create a team (legacy — uses old TeamManager) */
-    createTeam: (projectId, { prompt, teamName = "chibi-team", model = "claude-sonnet-4-5-20250929" }) =>
-        api.post(`/projects/${projectId}/teams`, {
-            prompt,
-            team_name: teamName,
-            model,
-        }),
-
-    /** Add a teammate */
-    addTeammate: (projectId, prompt) =>
-        api.post(`/projects/${projectId}/teams/teammates`, { prompt }),
-
-    /** Remove a teammate */
-    removeTeammate: (projectId, agentId) =>
-        api.del(`/projects/${projectId}/teams/teammates/${agentId}`),
+    /** Send command to lead agent */
+    command: (projectId, message) =>
+        api.post(`/projects/${projectId}/teams/command`, { message }),
 
     /** Send message to specific agent */
     sendMessage: (projectId, toAgentName, message) =>
@@ -90,17 +72,23 @@ const agentService = {
     broadcast: (projectId, message) =>
         api.post(`/projects/${projectId}/teams/broadcast`, { message }),
 
-    /** Send command */
-    command: (projectId, message) =>
-        api.post(`/projects/${projectId}/teams/command`, { message }),
-
-    /** Fetch team output (legacy) */
-    output: (projectId, lastN = 50) =>
-        api.get(`/projects/${projectId}/teams/output?last_n=${lastN}`),
-
     /** Cleanup / disband team */
     cleanup: (projectId) =>
         api.post(`/projects/${projectId}/teams/cleanup`),
+
+    /* ── CLI Agent Teams file-based data ───────────────── */
+
+    /** Get team config.json from ~/.claude/teams/ */
+    teamConfig: (projectId) =>
+        api.get(`/projects/${projectId}/teams/config`),
+
+    /** Get all inbox messages for the team */
+    teamInboxes: (projectId) =>
+        api.get(`/projects/${projectId}/teams/inboxes`),
+
+    /** Get Claude Code shared task list */
+    teamTasks: (projectId) =>
+        api.get(`/projects/${projectId}/teams/tasks`),
 };
 
 export default agentService;

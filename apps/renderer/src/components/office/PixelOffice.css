@@ -490,6 +490,24 @@
     animation: pixel-idle 2.5s ease-in-out infinite;
 }
 
+.pixel-agent.walking .pixel-agent-body {
+    animation: pixel-walk 0.3s steps(2) infinite;
+}
+
+@keyframes pixel-walk {
+    0% {
+        transform: translateY(0);
+    }
+
+    50% {
+        transform: translateY(-3px);
+    }
+
+    100% {
+        transform: translateY(0);
+    }
+}
+
 /* ── Tile decorations via background patterns ────────────────── */
 .pixel-floor-pattern {
     position: absolute;

@@ -1,13 +1,12 @@
-"""Unified Team Orchestrator — single service for all agent team management.
+"""Unified Team Orchestrator — CLI Agent Teams only.
 
-Replaces both TeamManager (CLI Agent Teams) and AgentOrchestrator (SDK subagents)
-with a unified approach:
+Uses Claude Code CLI with --teammate-mode in-process to create real Agent Teams.
+Each agent is a separate CLI instance managed by the lead session.
 
-1. SDK mode (preferred): Uses claude_agent_sdk.query() with AgentDefinition subagents
-2. CLI mode (fallback): Uses Claude CLI with AGENT_TEAMS env var
-
-All agents (lead + teammates) are fully tracked in the database,
-visible in the 3D office, and streamed via WebSocket.
+Monitors:
+- CLI stdout (streaming JSON) for real-time output
+- ~/.claude/teams/{name}/ files for team config and inbox changes
+- ~/.claude/tasks/ for shared task list changes
 """
 
 import asyncio
@@ -27,7 +26,11 @@ from models.session import AgentSession, SessionStatus
 from models.task import Task, TaskStatus
 from services.git_workspace import GitWorkspaceManager
 from services.task_dispatcher import TaskDispatcher
-from services.team_presets import TEAM_PRESETS, get_preset_summary
+from services.team_presets import (
+    TEAM_PRESETS, get_preset_summary,
+    build_team_creation_prompt, build_custom_team_prompt,
+)
+from services.team_file_watcher import TeamFileWatcher
 from websocket.manager import ConnectionManager
 from websocket.events import (
     WSEvent,
@@ -41,36 +44,13 @@ from websocket.events import (
     EVENT_TEAM_AGENT_COMPLETED,
     EVENT_TEAM_TASK_DELEGATED,
     EVENT_TEAM_MESSAGE,
+    EVENT_TEAM_INBOX_MESSAGE,
+    EVENT_TEAM_CONFIG_CHANGED,
+    EVENT_CLAUDE_TASK_CREATED,
+    EVENT_CLAUDE_TASK_UPDATED,
 )
 
 logger = logging.getLogger(__name__)
-
-
-# ─── Bash security hook ──────────────────────────────────────────────
-
-BLOCKED_COMMANDS = {
-    "rm -rf /", "rm -rf /*", "mkfs", "dd if=",
-    ":(){:|:&};:", "chmod -R 777 /",
-    "curl | sh", "wget | sh", "curl | bash", "wget | bash",
-}
-
-
-async def _bash_security_hook(input_data, tool_use_id, context):
-    """PreToolUse hook: validate bash commands before execution."""
-    tool_input = input_data.get("tool_input", {})
-    command = tool_input.get("command", "")
-    cmd_lower = command.strip().lower()
-    for blocked in BLOCKED_COMMANDS:
-        if blocked in cmd_lower:
-            logger.warning(f"Blocked dangerous command: {command[:100]}")
-            return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": f"Command blocked: {blocked}",
-                }
-            }
-    return {}
 
 
 # ─── Team State Tracker ──────────────────────────────────────────────
@@ -85,42 +65,26 @@ class TeamState:
         self.lead_agent_id: Optional[int] = None
         self.agent_ids: list[int] = []
         self.started_at = datetime.now(timezone.utc)
-        self.output_lines: dict[int, list[dict]] = {}  # agent_id -> lines
-        # SDK session management
-        self.command_queue: asyncio.Queue = asyncio.Queue()
+        self.output_lines: dict[int, list[dict]] = {}
         self.stop_event: asyncio.Event = asyncio.Event()
+        # CLI Agent Teams
+        self.cli_team_name: Optional[str] = None  # Name in ~/.claude/teams/
+        self.file_watcher: Optional[TeamFileWatcher] = None
+        self.watcher_task: Optional[asyncio.Task] = None
 
 
 # ─── Unified Team Orchestrator ───────────────────────────────────────
 
 class UnifiedTeamOrchestrator:
-    """
-    Central coordinator for agent teams.
-
-    Supports two modes:
-    - SDK: Uses query() with AgentDefinition subagents
-    - CLI: Uses Claude CLI with AGENT_TEAMS env var (fallback)
-    """
+    """Central coordinator for CLI Agent Teams."""
 
     def __init__(self, ws_manager: ConnectionManager):
         self.ws = ws_manager
         self.git = GitWorkspaceManager(settings.WORKTREE_BASE)
         self.dispatcher = TaskDispatcher()
-        self._teams: dict[int, TeamState] = {}  # project_id -> TeamState
-        self._session_ids: dict[int, Optional[str]] = {}  # project_id -> SDK session_id
-        self._cli_processes: dict[int, asyncio.subprocess.Process] = {}  # project_id -> Process
-        self._monitors: dict[int, asyncio.Task] = {}  # project_id -> monitor task
-        self._agent_monitors: dict[int, asyncio.Task] = {}  # agent_id -> monitor task
-
-    # ─── SDK availability check ───────────────────────────────────
-
-    @staticmethod
-    def _sdk_available() -> bool:
-        try:
-            import claude_agent_sdk  # noqa: F401
-            return True
-        except ImportError:
-            return False
+        self._teams: dict[int, TeamState] = {}
+        self._cli_processes: dict[int, asyncio.subprocess.Process] = {}
+        self._monitors: dict[int, asyncio.Task] = {}
 
     # ═══════════════════════════════════════════════════════════════
     # TEAM LIFECYCLE
@@ -135,152 +99,43 @@ class UnifiedTeamOrchestrator:
         project_name: str,
         model: str = "",
     ) -> dict:
-        """
-        Create a team from a predefined preset.
+        """Create a team using Claude Code CLI Agent Teams from a preset.
 
-        1. Create all Agent DB records (lead + teammates)
-        2. Create git worktrees for each agent
-        3. Return agent list
-        4. Start SDK query with subagent definitions
-        5. Broadcast team.created event
+        1. Create lead Agent DB record only (teammates created dynamically by file watcher)
+        2. Create git worktree for lead
+        3. Build NL prompt from preset
+        4. Start CLI with --teammate-mode in-process
+        5. Start file watcher for ~/.claude/teams/
         """
         preset = TEAM_PRESETS.get(preset_id)
         if not preset:
             return {"error": f"Unknown preset: {preset_id}"}
 
-        # Clean up any existing team
         await self.cleanup_team(db, project_id)
 
         lead_model = model or settings.CLAUDE_MODEL
         team_name = f"{project_name}-{preset_id}"
 
-        # 1. Create all Agent DB records
-        agents = []
-        for agent_def in preset["db_agents"]:
-            agent = Agent(
-                project_id=project_id,
-                name=agent_def["name"],
-                role=AgentRole(agent_def["role"]),
-                avatar_key=agent_def["avatar_key"],
-                is_lead=agent_def["is_lead"],
-                team_name=team_name,
-                model=lead_model if agent_def["is_lead"] else settings.SUBAGENT_MODEL,
-                sdk_agent_key=agent_def["sdk_agent_key"],
-                orchestration_mode="sdk" if self._sdk_available() else "cli",
-                status=AgentStatus.IDLE,
-            )
-            db.add(agent)
-            agents.append(agent)
-        db.commit()
-        for a in agents:
-            db.refresh(a)
-
-        # Set parent_agent_id for non-lead agents
-        lead = next(a for a in agents if a.is_lead)
-        for a in agents:
-            if not a.is_lead:
-                a.parent_agent_id = lead.id
-                db.add(a)
-        db.commit()
-
-        # 2. Create worktrees + sessions
-        for agent in agents:
-            try:
-                wt = self.git.create_worktree(repo_path, agent.id, project_name)
-                session = AgentSession(
-                    agent_id=agent.id,
-                    status=SessionStatus.IDLE,
-                    worktree_path=wt["worktree_path"],
-                    branch_name=wt["branch_name"],
-                )
-                db.add(session)
-            except RuntimeError as e:
-                logger.error(f"Worktree creation failed for agent-{agent.id}: {e}")
-        db.commit()
-
-        # 3. Init simulation
-        # 4. Track team state
-        state = TeamState(project_id, team_name, preset_id)
-        state.lead_agent_id = lead.id
-        state.agent_ids = [a.id for a in agents]
-        self._teams[project_id] = state
-
-        # 5. Start SDK or CLI session
-        initial_prompt = (
-            f"You are leading a {preset['name']}. "
-            f"Coordinate with your subagents to accomplish the team's goals. "
-            f"Delegate tasks as appropriate."
-        )
-        if self._sdk_available():
-            await self._start_sdk_preset_session(
-                db, project_id, lead, preset, agents, initial_prompt,
-            )
-        else:
-            await self._start_cli_session(db, project_id, lead, initial_prompt, repo_path)
-
-        # 6. Broadcast team created
-        await self.ws.broadcast(
-            project_id,
-            WSEvent(
-                type=EVENT_TEAM_CREATED,
-                data={
-                    "team_name": team_name,
-                    "preset_id": preset_id,
-                    "agents": [_agent_dict(a) for a in agents],
-                },
-            ),
-        )
-
-        logger.info(
-            f"Team '{team_name}' created: {len(agents)} agents "
-            f"(preset={preset_id}, mode={'sdk' if self._sdk_available() else 'cli'})"
-        )
-
-        return {
-            "team_name": team_name,
-            "preset_id": preset_id,
-            "lead_id": lead.id,
-            "agents": [_agent_dict(a) for a in agents],
-        }
-
-    async def create_team_from_prompt(
-        self,
-        db: Session,
-        project_id: int,
-        prompt: str,
-        team_name: str,
-        repo_path: str,
-        model: str = "",
-    ) -> dict:
-        """
-        Create a team from a natural language prompt.
-
-        Creates a lead agent, starts an SDK session, and lets Claude
-        decide the team structure based on the prompt.
-        """
-        await self.cleanup_team(db, project_id)
-
-        lead_model = model or settings.CLAUDE_MODEL
-
-        # Create lead agent
+        # 1. Create only lead agent record
+        lead_def = next(a for a in preset["db_agents"] if a["is_lead"])
         lead = Agent(
             project_id=project_id,
-            name="Lead Agent",
-            role=AgentRole.LEAD,
-            avatar_key="lead",
+            name=lead_def["name"],
+            role=AgentRole(lead_def["role"]),
+            avatar_key=lead_def["avatar_key"],
             is_lead=True,
             team_name=team_name,
             model=lead_model,
-            orchestration_mode="sdk" if self._sdk_available() else "cli",
+            orchestration_mode="cli",
             status=AgentStatus.IDLE,
         )
         db.add(lead)
         db.commit()
         db.refresh(lead)
 
-        # Create worktree for lead
+        # 2. Create worktree for lead
         try:
-            wt = self.git.create_worktree(repo_path, lead.id, "project")
+            wt = self.git.create_worktree(repo_path, lead.id, project_name)
             session = AgentSession(
                 agent_id=lead.id,
                 status=SessionStatus.STARTING,
@@ -293,28 +148,94 @@ class UnifiedTeamOrchestrator:
             logger.error(f"Worktree creation failed for lead: {e}")
             return {"error": str(e)}
 
-        # Init simulation
-        # Track state
+        # 3. Build NL prompt from preset
+        prompt = build_team_creation_prompt(preset_id, f"Working directory: {repo_path}")
+
+        # 4. Track team state
+        state = TeamState(project_id, team_name, preset_id)
+        state.lead_agent_id = lead.id
+        state.agent_ids = [lead.id]
+        self._teams[project_id] = state
+
+        # 5. Start CLI session + file watcher
+        await self._start_cli_team_session(db, project_id, lead, prompt, repo_path)
+
+        # 6. Broadcast team created
+        await self.ws.broadcast(
+            project_id,
+            WSEvent(type=EVENT_TEAM_CREATED, data={
+                "team_name": team_name,
+                "preset_id": preset_id,
+                "agents": [_agent_dict(lead)],
+            }),
+        )
+
+        logger.info(f"Team '{team_name}' created: lead={lead.id} (preset={preset_id})")
+        return {
+            "team_name": team_name,
+            "preset_id": preset_id,
+            "lead_id": lead.id,
+            "agents": [_agent_dict(lead)],
+        }
+
+    async def create_team_from_prompt(
+        self,
+        db: Session,
+        project_id: int,
+        prompt: str,
+        team_name: str,
+        repo_path: str,
+        model: str = "",
+    ) -> dict:
+        """Create a team from a natural language prompt via CLI Agent Teams."""
+        await self.cleanup_team(db, project_id)
+
+        lead_model = model or settings.CLAUDE_MODEL
+
+        lead = Agent(
+            project_id=project_id,
+            name="Lead Agent",
+            role=AgentRole.LEAD,
+            avatar_key="lead",
+            is_lead=True,
+            team_name=team_name,
+            model=lead_model,
+            orchestration_mode="cli",
+            status=AgentStatus.IDLE,
+        )
+        db.add(lead)
+        db.commit()
+        db.refresh(lead)
+
+        try:
+            wt = self.git.create_worktree(repo_path, lead.id, "project")
+            session = AgentSession(
+                agent_id=lead.id,
+                status=SessionStatus.STARTING,
+                worktree_path=wt["worktree_path"],
+                branch_name=wt["branch_name"],
+            )
+            db.add(session)
+            db.commit()
+        except RuntimeError as e:
+            return {"error": str(e)}
+
+        # Wrap user prompt with team creation instructions
+        cli_prompt = build_custom_team_prompt(prompt, team_name)
+
         state = TeamState(project_id, team_name)
         state.lead_agent_id = lead.id
         state.agent_ids = [lead.id]
         self._teams[project_id] = state
 
-        # Start SDK/CLI session with the prompt
-        if self._sdk_available():
-            await self._start_sdk_prompt_session(db, project_id, lead, prompt, wt["worktree_path"])
-        else:
-            await self._start_cli_session(db, project_id, lead, prompt, repo_path)
+        await self._start_cli_team_session(db, project_id, lead, cli_prompt, repo_path)
 
         await self.ws.broadcast(
             project_id,
-            WSEvent(
-                type=EVENT_TEAM_CREATED,
-                data={
-                    "team_name": team_name,
-                    "agents": [_agent_dict(lead)],
-                },
-            ),
+            WSEvent(type=EVENT_TEAM_CREATED, data={
+                "team_name": team_name,
+                "agents": [_agent_dict(lead)],
+            }),
         )
 
         return {
@@ -334,21 +255,32 @@ class UnifiedTeamOrchestrator:
         repo_path: str,
         project_name: str,
     ) -> list[dict]:
-        """Auto-assign tasks to agents and start them."""
-        assignments = self.dispatcher.auto_assign(db, project_id)
-        started = []
+        """Dispatch tasks by telling the lead agent to assign them."""
+        # Get pending tasks
+        tasks = db.exec(
+            select(Task).where(
+                Task.project_id == project_id,
+                Task.status == TaskStatus.TODO,
+            )
+        ).all()
 
-        for assignment in assignments:
-            agent = db.get(Agent, assignment["agent_id"])
-            task = db.get(Task, assignment["task_id"])
-            if agent and task:
-                try:
-                    await self.start_agent_on_task(db, agent, task, project_name, repo_path)
-                    started.append(assignment)
-                except Exception as e:
-                    logger.error(f"Failed to start agent-{agent.id}: {e}")
+        if not tasks:
+            return []
 
-        return started
+        # Tell the lead to dispatch tasks
+        task_list = "\n".join(f"- {t.title}" for t in tasks)
+        message = (
+            f"Please assign and dispatch these tasks to your teammates:\n{task_list}\n\n"
+            f"Match tasks to the most appropriate teammate based on their role."
+        )
+        result = await self.send_command_to_lead(project_id, message)
+
+        if "error" in result:
+            # Fallback: use TaskDispatcher for local assignment
+            assignments = self.dispatcher.auto_assign(db, project_id)
+            return assignments
+
+        return [{"dispatched": True, "task_count": len(tasks)}]
 
     async def start_agent_on_task(
         self,
@@ -358,30 +290,10 @@ class UnifiedTeamOrchestrator:
         project_name: str,
         repo_path: str,
     ) -> AgentSession:
-        """Start a single agent on a specific task."""
-        # Get or create session
-        session = db.exec(
-            select(AgentSession).where(AgentSession.agent_id == agent.id)
-        ).first()
-
-        if not session:
-            wt = self.git.create_worktree(repo_path, agent.id, project_name)
-            session = AgentSession(
-                agent_id=agent.id,
-                status=SessionStatus.STARTING,
-                worktree_path=wt["worktree_path"],
-                branch_name=wt["branch_name"],
-            )
-            db.add(session)
-            db.commit()
-            db.refresh(session)
-
-        # Update task
+        """Start a single agent on a task by messaging the lead."""
         task.status = TaskStatus.IN_PROGRESS
         task.assigned_agent_id = agent.id
         db.add(task)
-
-        # Update agent status
         agent.status = AgentStatus.WORKING
         db.add(agent)
         db.commit()
@@ -389,179 +301,20 @@ class UnifiedTeamOrchestrator:
         await self._emit_agent_status(agent.project_id, agent.id, "working", f"Working on: {task.title}")
         await self._emit_task_update(agent.project_id, task)
 
-        # Build prompt
-        prompt = self.dispatcher.build_prompt(task)
+        # Tell lead to assign this task to the specific agent
+        message = f"Assign task '{task.title}' to teammate {agent.name}. Description: {task.description or task.title}"
+        await self.send_command_to_lead(agent.project_id, message)
 
-        # Start SDK session for this agent
-        if self._sdk_available() and session.worktree_path:
-            await self._start_sdk_agent_session(db, agent, session, prompt)
-        else:
-            await self._start_cli_agent_session(db, agent, session, prompt, repo_path)
-
+        session = db.exec(
+            select(AgentSession).where(AgentSession.agent_id == agent.id)
+        ).first()
         return session
 
     # ═══════════════════════════════════════════════════════════════
-    # SDK MODE
+    # CLI SESSION MANAGEMENT
     # ═══════════════════════════════════════════════════════════════
 
-    async def _start_sdk_preset_session(
-        self,
-        db: Session,
-        project_id: int,
-        lead: Agent,
-        preset: dict,
-        agents: list[Agent],
-        initial_prompt: str,
-    ):
-        """Build SDK options from preset and start monitoring query."""
-        from claude_agent_sdk import ClaudeAgentOptions, AgentDefinition, HookMatcher
-
-        # Build AgentDefinition dict from preset
-        agent_definitions = {}
-        for key, agent_cfg in preset["agents"].items():
-            matching_agent = next((a for a in agents if a.sdk_agent_key == key), None)
-            if not matching_agent:
-                continue
-            matching_session = db.exec(
-                select(AgentSession).where(AgentSession.agent_id == matching_agent.id)
-            ).first()
-
-            wt_path = matching_session.worktree_path if matching_session else ""
-            enhanced_prompt = (
-                f"{agent_cfg['prompt']}\n\n"
-                f"Your working directory is: {wt_path}\n"
-                f"All file operations must be within this directory."
-            )
-            agent_definitions[key] = AgentDefinition(
-                description=agent_cfg["description"],
-                prompt=enhanced_prompt,
-                tools=agent_cfg.get("tools"),
-                model=agent_cfg.get("model", "sonnet"),
-            )
-
-        # Get lead worktree
-        lead_session = db.exec(
-            select(AgentSession).where(AgentSession.agent_id == lead.id)
-        ).first()
-
-        options = ClaudeAgentOptions(
-            model=lead.model,
-            system_prompt=preset["lead_prompt"],
-            allowed_tools=settings.AGENT_SDK_ALLOWED_TOOLS + ["Task"],
-            permission_mode="acceptEdits",
-            cwd=lead_session.worktree_path if lead_session else ".",
-            max_turns=settings.AGENT_SDK_MAX_TURNS,
-            agents=agent_definitions,
-            hooks={
-                "PreToolUse": [HookMatcher(matcher="Bash", hooks=[_bash_security_hook])],
-                "SubagentStop": [HookMatcher(hooks=[
-                    self._make_subagent_stop_hook(project_id, agents),
-                ])],
-                "PostToolUse": [HookMatcher(matcher="Task", hooks=[
-                    self._make_task_delegation_hook(project_id, agents),
-                ])],
-            },
-        )
-
-        # Update lead status
-        lead.status = AgentStatus.WORKING
-        db.add(lead)
-        if lead_session:
-            lead_session.status = SessionStatus.RUNNING
-            db.add(lead_session)
-        db.commit()
-
-        # Start monitoring query
-        monitor = asyncio.create_task(
-            self._monitor_sdk_session(db, project_id, lead, options, initial_prompt)
-        )
-        self._monitors[project_id] = monitor
-
-    async def _start_sdk_prompt_session(
-        self,
-        db: Session,
-        project_id: int,
-        lead: Agent,
-        prompt: str,
-        working_dir: str,
-    ):
-        """Build SDK options from prompt and start monitoring query."""
-        from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
-
-        options = ClaudeAgentOptions(
-            model=lead.model,
-            system_prompt=(
-                "You are a lead developer. Analyze the task and coordinate work. "
-                "Use the Task tool to delegate subtasks to subagents when needed."
-            ),
-            allowed_tools=settings.AGENT_SDK_ALLOWED_TOOLS + ["Task"],
-            permission_mode="acceptEdits",
-            cwd=working_dir,
-            max_turns=settings.AGENT_SDK_MAX_TURNS,
-            hooks={
-                "PreToolUse": [HookMatcher(matcher="Bash", hooks=[_bash_security_hook])],
-            },
-        )
-
-        lead.status = AgentStatus.WORKING
-        db.add(lead)
-        lead_session = db.exec(
-            select(AgentSession).where(AgentSession.agent_id == lead.id)
-        ).first()
-        if lead_session:
-            lead_session.status = SessionStatus.RUNNING
-            db.add(lead_session)
-        db.commit()
-
-        monitor = asyncio.create_task(
-            self._monitor_sdk_session(db, project_id, lead, options, prompt)
-        )
-        self._monitors[project_id] = monitor
-
-    async def _start_sdk_agent_session(
-        self,
-        db: Session,
-        agent: Agent,
-        session: AgentSession,
-        prompt: str,
-    ):
-        """Build SDK options and start monitoring query for a single agent."""
-        from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
-        from services.agent_sdk_adapter import ROLE_PROMPTS
-
-        role_desc = ROLE_PROMPTS.get(agent.role.value, ROLE_PROMPTS.get("backend", ""))
-        system_prompt = (
-            f"{role_desc}\n\n"
-            f"Your working directory is: {session.worktree_path}\n"
-            f"After completing work, summarize what you did."
-        )
-
-        options = ClaudeAgentOptions(
-            model=agent.model,
-            system_prompt=system_prompt,
-            allowed_tools=settings.AGENT_SDK_ALLOWED_TOOLS,
-            permission_mode="acceptEdits",
-            cwd=session.worktree_path,
-            max_turns=settings.AGENT_SDK_MAX_TURNS,
-            hooks={
-                "PreToolUse": [HookMatcher(matcher="Bash", hooks=[_bash_security_hook])],
-            },
-        )
-
-        session.status = SessionStatus.RUNNING
-        db.add(session)
-        db.commit()
-
-        monitor = asyncio.create_task(
-            self._monitor_sdk_agent(db, agent, session, prompt, options)
-        )
-        self._agent_monitors[agent.id] = monitor
-
-    # ═══════════════════════════════════════════════════════════════
-    # CLI FALLBACK
-    # ═══════════════════════════════════════════════════════════════
-
-    async def _start_cli_session(
+    async def _start_cli_team_session(
         self,
         db: Session,
         project_id: int,
@@ -569,21 +322,22 @@ class UnifiedTeamOrchestrator:
         prompt: str,
         repo_path: str,
     ):
-        """Start CLI Agent Teams session as fallback."""
+        """Start Claude CLI with Agent Teams + file watcher."""
         resolved_cli = shutil.which(settings.CLAUDE_CLI)
         if not resolved_cli:
             logger.error(f"Claude CLI not found at '{settings.CLAUDE_CLI}'")
             return
 
-        env = {**os.environ, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"}
         cmd = [
             resolved_cli,
             "--print", "--output-format", "stream-json",
-            "--teammate-mode", "in-process",
+            "--teammate-mode", settings.TEAMMATE_MODE,
         ]
         if lead.model:
             cmd.extend(["--model", lead.model])
         cmd.extend(["-p", prompt])
+
+        env = {**os.environ, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"}
 
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=repo_path, env=env,
@@ -594,6 +348,7 @@ class UnifiedTeamOrchestrator:
         )
         self._cli_processes[project_id] = proc
 
+        # Update lead status
         lead.status = AgentStatus.WORKING
         db.add(lead)
         lead_session = db.exec(
@@ -605,254 +360,43 @@ class UnifiedTeamOrchestrator:
             db.add(lead_session)
         db.commit()
 
-        monitor = asyncio.create_task(
+        await self._emit_agent_status(project_id, lead.id, "working", "CLI session started")
+
+        # Start CLI output monitor
+        cli_monitor = asyncio.create_task(
             self._monitor_cli_session(db, project_id, lead, proc)
         )
-        self._monitors[project_id] = monitor
+        self._monitors[project_id] = cli_monitor
 
-    async def _start_cli_agent_session(
-        self,
-        db: Session,
-        agent: Agent,
-        session: AgentSession,
-        prompt: str,
-        repo_path: str,
-    ):
-        """Start a CLI subprocess for a single agent (non-teams mode)."""
-        resolved_cli = shutil.which(settings.CLAUDE_CLI)
-        if not resolved_cli:
-            return
+        # Start file watcher (delayed to give Claude time to create team dir)
+        state = self._teams[project_id]
+        team_name = state.team_name
 
-        cmd = [
-            resolved_cli,
-            "--print", "--output-format", "stream-json",
-            "-p", prompt,
-        ]
-        if agent.model:
-            cmd.extend(["--model", agent.model])
+        watcher = TeamFileWatcher(team_name, poll_interval=settings.FILE_WATCHER_POLL_INTERVAL)
+        state.file_watcher = watcher
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=session.worktree_path or repo_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            preexec_fn=os.setsid if os.name != "nt" else None,
+        # Wire callbacks
+        watcher.on_member_joined(
+            lambda member: self._on_file_member_joined(db, project_id, member)
+        )
+        watcher.on_member_left(
+            lambda agent_id: self._on_file_member_left(db, project_id, agent_id)
+        )
+        watcher.on_inbox_message(
+            lambda inbox, msg: self._on_file_inbox_message(db, project_id, inbox, msg)
+        )
+        watcher.on_task_update(
+            lambda task_data, is_new: self._on_file_task_update(project_id, task_data, is_new)
         )
 
-        session.status = SessionStatus.RUNNING
-        session.pid = proc.pid
-        db.add(session)
-        db.commit()
+        async def _delayed_watcher():
+            await asyncio.sleep(3)
+            await watcher.start()
 
-        monitor = asyncio.create_task(
-            self._monitor_cli_agent(db, agent, proc)
-        )
-        self._agent_monitors[agent.id] = monitor
+        state.watcher_task = asyncio.create_task(_delayed_watcher())
 
     # ═══════════════════════════════════════════════════════════════
-    # MONITORING — SDK
-    # ═══════════════════════════════════════════════════════════════
-
-    async def _monitor_sdk_session(
-        self,
-        db: Session,
-        project_id: int,
-        lead: Agent,
-        options,
-        initial_prompt: str,
-    ):
-        """Monitor an SDK lead session. Runs initial query, then waits for commands."""
-        from claude_agent_sdk import (
-            query, ClaudeAgentOptions,
-            AssistantMessage, ResultMessage, SystemMessage,
-            TextBlock, ToolUseBlock, ToolResultBlock,
-        )
-
-        state = self._teams.get(project_id)
-        current_prompt = initial_prompt
-        current_options = options
-
-        try:
-            while state and not state.stop_event.is_set():
-                # ── Run a single SDK query ──────────────────────────
-                async for message in query(prompt=current_prompt, options=current_options):
-                    # Extract session_id from init message
-                    if isinstance(message, SystemMessage):
-                        sid = getattr(message, "session_id", None)
-                        if sid:
-                            self._session_ids[project_id] = sid
-                        subtype = getattr(message, "subtype", "")
-                        if subtype != "init":
-                            await self._emit_log(project_id, lead.id, f"[{subtype}]", "system")
-
-                    elif isinstance(message, AssistantMessage):
-                        for block in message.content:
-                            if isinstance(block, TextBlock):
-                                await self._emit_log(project_id, lead.id, block.text, "text")
-                            elif isinstance(block, ToolUseBlock):
-                                await self._emit_log(
-                                    project_id, lead.id,
-                                    f"[{block.name}] {_summarize_tool(block.name, block.input)}",
-                                    "tool_use",
-                                )
-                                await self._emit_tool_event(project_id, lead.id, {
-                                    "type": "tool_use",
-                                    "content": f"[{block.name}]",
-                                    "raw": {"tool": block.name, "input": block.input},
-                                })
-                            elif isinstance(block, ToolResultBlock):
-                                content = block.content
-                                if isinstance(content, list):
-                                    content = " ".join(
-                                        b.get("text", "") for b in content if isinstance(b, dict)
-                                    )
-                                await self._emit_log(
-                                    project_id, lead.id,
-                                    str(content)[:300] if content else "",
-                                    "tool_result",
-                                )
-
-                    elif isinstance(message, ResultMessage):
-                        # Store session_id for resume
-                        sid = getattr(message, "session_id", None)
-                        if sid:
-                            self._session_ids[project_id] = sid
-
-                        # Update lead session with result metadata
-                        lead_session = db.exec(
-                            select(AgentSession).where(AgentSession.agent_id == lead.id)
-                        ).first()
-                        if lead_session:
-                            lead_session.sdk_session_id = sid
-                            lead_session.total_cost_usd = getattr(message, "total_cost_usd", None)
-                            lead_session.num_turns = getattr(message, "num_turns", None)
-                            lead_session.status = SessionStatus.IDLE
-                            db.add(lead_session)
-
-                        lead.status = AgentStatus.IDLE
-                        db.add(lead)
-                        db.commit()
-
-                        await self.ws.broadcast(
-                            project_id,
-                            WSEvent(type=EVENT_SESSION_RESULT, data={
-                                "agent_id": lead.id,
-                                "num_turns": getattr(message, "num_turns", None),
-                                "duration_ms": getattr(message, "duration_ms", None),
-                                "total_cost_usd": getattr(message, "total_cost_usd", None),
-                                "is_error": getattr(message, "is_error", False),
-                            }),
-                        )
-
-                # ── Query finished — wait for follow-up commands ───
-                await self._emit_agent_status(project_id, lead.id, "idle", "Ready for commands")
-
-                # Wait for a command from the queue, checking stop_event periodically
-                next_cmd = None
-                while state and not state.stop_event.is_set():
-                    try:
-                        next_cmd = await asyncio.wait_for(
-                            state.command_queue.get(), timeout=5.0,
-                        )
-                        break
-                    except asyncio.TimeoutError:
-                        continue
-
-                if next_cmd is None or state.stop_event.is_set():
-                    break
-
-                # Resume session with new command
-                session_id = self._session_ids.get(project_id)
-                if session_id:
-                    current_prompt = next_cmd
-                    current_options = ClaudeAgentOptions(resume=session_id)
-                    lead.status = AgentStatus.WORKING
-                    db.add(lead)
-                    db.commit()
-                    await self._emit_agent_status(
-                        project_id, lead.id, "working", "Processing command",
-                    )
-                else:
-                    logger.warning(f"No session_id to resume for project-{project_id}")
-                    break
-
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.error(f"SDK session error for project-{project_id}: {e}", exc_info=True)
-            await self._emit_agent_status(project_id, lead.id, "failed", str(e))
-        finally:
-            self._session_ids.pop(project_id, None)
-
-            # Commit any worktree changes
-            for agent_id in (state.agent_ids if state else []):
-                session = db.exec(
-                    select(AgentSession).where(AgentSession.agent_id == agent_id)
-                ).first()
-                if session and session.worktree_path:
-                    agent = db.get(Agent, agent_id)
-                    self.git.commit_changes(
-                        session.worktree_path,
-                        f"[chibi] {agent.name if agent else 'agent'} changes",
-                        agent.name if agent else "Chibi Agent",
-                    )
-
-    async def _monitor_sdk_agent(
-        self,
-        db: Session,
-        agent: Agent,
-        session: AgentSession,
-        prompt: str,
-        options,
-    ):
-        """Monitor an individual SDK agent session (single query)."""
-        from claude_agent_sdk import (
-            query, AssistantMessage, ResultMessage, TextBlock, ToolUseBlock,
-        )
-
-        try:
-            async for message in query(prompt=prompt, options=options):
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            await self._emit_log(agent.project_id, agent.id, block.text, "text")
-                        elif isinstance(block, ToolUseBlock):
-                            await self._emit_log(
-                                agent.project_id, agent.id,
-                                f"[{block.name}] {_summarize_tool(block.name, block.input)}",
-                                "tool_use",
-                            )
-
-                elif isinstance(message, ResultMessage):
-                    session.sdk_session_id = getattr(message, "session_id", None)
-                    session.total_cost_usd = getattr(message, "total_cost_usd", None)
-                    session.num_turns = getattr(message, "num_turns", None)
-                    session.status = SessionStatus.IDLE
-                    db.add(session)
-
-                    agent.status = AgentStatus.IDLE
-                    db.add(agent)
-                    db.commit()
-
-                    # Commit changes
-                    if session.worktree_path:
-                        self.git.commit_changes(
-                            session.worktree_path,
-                            f"[chibi] {agent.name} work",
-                            agent.name,
-                        )
-
-                    await self._emit_agent_status(
-                        agent.project_id, agent.id, "idle", "Task completed"
-                    )
-
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.error(f"SDK agent-{agent.id} error: {e}", exc_info=True)
-            await self._emit_agent_status(agent.project_id, agent.id, "failed", str(e))
-
-    # ═══════════════════════════════════════════════════════════════
-    # MONITORING — CLI
+    # CLI MONITORING
     # ═══════════════════════════════════════════════════════════════
 
     async def _monitor_cli_session(
@@ -862,8 +406,7 @@ class UnifiedTeamOrchestrator:
         lead: Agent,
         proc: asyncio.subprocess.Process,
     ):
-        """Monitor CLI lead session, parse teammate events."""
-        state = self._teams.get(project_id)
+        """Monitor CLI lead session — parse streaming JSON for output."""
 
         async def _read_stream(stream, source: str):
             try:
@@ -871,19 +414,19 @@ class UnifiedTeamOrchestrator:
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line:
                         continue
-
                     try:
                         data = json.loads(line)
                         event_type = data.get("type", "text")
                         content = data.get("content", data.get("text", line))
 
-                        # Detect teammate lifecycle events
-                        if event_type == "teammate_spawned" and state:
-                            await self._handle_cli_teammate_spawned(db, project_id, data, state)
-                        elif event_type == "teammate_stopped" and state:
-                            await self._handle_cli_teammate_stopped(db, project_id, data)
-
                         await self._emit_log(project_id, lead.id, content, event_type)
+
+                        if event_type == "tool_use":
+                            await self._emit_tool_event(project_id, lead.id, {
+                                "type": "tool_use",
+                                "content": content,
+                                "raw": data.get("raw"),
+                            })
 
                     except json.JSONDecodeError:
                         await self._emit_log(project_id, lead.id, line, source)
@@ -904,6 +447,12 @@ class UnifiedTeamOrchestrator:
         # Session ended
         lead.status = AgentStatus.IDLE
         db.add(lead)
+        lead_session = db.exec(
+            select(AgentSession).where(AgentSession.agent_id == lead.id)
+        ).first()
+        if lead_session:
+            lead_session.status = SessionStatus.IDLE
+            db.add(lead_session)
         db.commit()
 
         await self.ws.broadcast(
@@ -914,168 +463,202 @@ class UnifiedTeamOrchestrator:
             }),
         )
 
-    async def _monitor_cli_agent(self, db: Session, agent: Agent, proc: asyncio.subprocess.Process):
-        """Monitor a single CLI agent subprocess."""
-        try:
-            async for raw_line in proc.stdout:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                    content = data.get("content", data.get("text", line))
-                    await self._emit_log(agent.project_id, agent.id, content, data.get("type", "text"))
-                except json.JSONDecodeError:
-                    await self._emit_log(agent.project_id, agent.id, line, "text")
-        except asyncio.CancelledError:
-            pass
+    # ═══════════════════════════════════════════════════════════════
+    # FILE WATCHER CALLBACKS
+    # ═══════════════════════════════════════════════════════════════
 
-        # Commit changes
-        session = db.exec(select(AgentSession).where(AgentSession.agent_id == agent.id)).first()
-        if session and session.worktree_path:
-            self.git.commit_changes(session.worktree_path, f"[chibi] {agent.name}", agent.name)
-            session.status = SessionStatus.IDLE
-            db.add(session)
+    async def _on_file_member_joined(self, db: Session, project_id: int, member_data: dict):
+        """File watcher detected a new member in config.json."""
+        state = self._teams.get(project_id)
+        if not state:
+            return
 
-        agent.status = AgentStatus.IDLE
-        db.add(agent)
-        db.commit()
-        await self._emit_agent_status(agent.project_id, agent.id, "idle", "Completed")
+        agent_id_str = member_data.get("agentId", "")
+        name = member_data.get("name", "Teammate")
 
-    async def _handle_cli_teammate_spawned(self, db, project_id, data, state):
-        """When CLI detects a new teammate, create Agent DB record."""
-        name = data.get("name", "Teammate")
-        role_str = data.get("role", "custom")
-        try:
-            role = AgentRole(role_str)
-        except ValueError:
-            role = AgentRole.CUSTOM
+        # Skip lead
+        if "team-lead" in agent_id_str or name == "team-lead":
+            return
+
+        # Skip if already exists
+        existing = db.exec(
+            select(Agent).where(
+                Agent.project_id == project_id,
+                Agent.team_name == state.team_name,
+                Agent.cli_agent_id == agent_id_str,
+            )
+        ).first()
+        if existing:
+            return
+
+        role = _map_agent_type_to_role(member_data.get("agentType", ""))
+        color = member_data.get("color", "")
 
         agent = Agent(
             project_id=project_id,
             name=name,
             role=role,
-            avatar_key=role_str,
+            avatar_key=role.value,
             is_lead=False,
             team_name=state.team_name,
             parent_agent_id=state.lead_agent_id,
             orchestration_mode="cli",
             status=AgentStatus.WORKING,
+            cli_agent_id=agent_id_str,
+            agent_color=color,
         )
         db.add(agent)
         db.commit()
         db.refresh(agent)
         state.agent_ids.append(agent.id)
 
-
         await self.ws.broadcast(
             project_id,
             WSEvent(type=EVENT_TEAM_AGENT_SPAWNED, data=_agent_dict(agent)),
         )
+        logger.info(f"File watcher: member joined '{name}' -> agent-{agent.id}")
 
-    async def _handle_cli_teammate_stopped(self, db, project_id, data):
-        """When CLI detects teammate stopped, update DB."""
-        name = data.get("name", "")
+    async def _on_file_member_left(self, db: Session, project_id: int, agent_id_str: str):
+        """File watcher detected a member removed from config.json."""
+        name = agent_id_str.split("@")[0] if "@" in agent_id_str else agent_id_str
         agent = db.exec(
-            select(Agent).where(Agent.project_id == project_id, Agent.name == name)
+            select(Agent).where(
+                Agent.project_id == project_id,
+                Agent.cli_agent_id == agent_id_str,
+            )
         ).first()
+        if not agent:
+            agent = db.exec(
+                select(Agent).where(
+                    Agent.project_id == project_id,
+                    Agent.name == name,
+                )
+            ).first()
         if agent:
-            agent.status = AgentStatus.IDLE
+            agent.status = AgentStatus.STOPPED
             db.add(agent)
             db.commit()
             await self.ws.broadcast(
                 project_id,
-                WSEvent(type=EVENT_TEAM_AGENT_COMPLETED, data={"agent_id": agent.id}),
+                WSEvent(type=EVENT_TEAM_AGENT_COMPLETED, data={
+                    "agent_id": agent.id, "name": agent.name,
+                }),
             )
 
-    # ═══════════════════════════════════════════════════════════════
-    # HOOKS
-    # ═══════════════════════════════════════════════════════════════
+    async def _on_file_inbox_message(
+        self, db: Session, project_id: int, inbox_name: str, msg: dict,
+    ):
+        """File watcher detected a new inbox message."""
+        text = msg.get("text", "")
+        from_agent = msg.get("from", inbox_name)
 
-    def _make_subagent_stop_hook(self, project_id: int, agents: list[Agent]):
-        """Create a SubagentStop hook that updates agent status."""
-        async def hook(input_data, tool_use_id, context):
-            # Try to identify which subagent stopped
-            for agent in agents:
-                if not agent.is_lead and agent.status == AgentStatus.WORKING:
+        # Try parse structured messages
+        parsed = None
+        if text.startswith("{"):
+            try:
+                parsed = json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        if parsed:
+            msg_type = parsed.get("type", "")
+
+            if msg_type == "idle_notification":
+                agent = self._find_agent_by_name(db, project_id, parsed.get("from", from_agent))
+                if agent:
                     agent.status = AgentStatus.IDLE
-                    # Note: DB commit happens in main monitor
-                    await self.ws.broadcast(
-                        project_id,
-                        WSEvent(type=EVENT_TEAM_AGENT_COMPLETED, data={
-                            "agent_id": agent.id,
-                            "name": agent.name,
-                        }),
-                    )
-                    break
-            return {}
-        return hook
+                    db.add(agent)
+                    db.commit()
+                    await self._emit_agent_status(project_id, agent.id, "idle", "Available")
+                return
 
-    def _make_task_delegation_hook(self, project_id: int, agents: list[Agent]):
-        """Create a PostToolUse hook for Task tool delegation tracking."""
-        async def hook(input_data, tool_use_id, context):
-            tool_input = input_data.get("tool_input", {})
-            subagent_type = tool_input.get("subagent_type", "")
-            description = tool_input.get("description", "")
-
-            # Find matching agent by sdk_agent_key
-            for agent in agents:
-                if agent.sdk_agent_key == subagent_type:
+            if msg_type == "task_assignment":
+                subject = parsed.get("subject", "")
+                to_name = inbox_name  # Task is assigned TO the inbox owner
+                agent = self._find_agent_by_name(db, project_id, to_name)
+                if agent:
                     agent.status = AgentStatus.WORKING
+                    db.add(agent)
+                    db.commit()
                     await self.ws.broadcast(
                         project_id,
                         WSEvent(type=EVENT_TEAM_TASK_DELEGATED, data={
-                            "from_agent_id": self._teams[project_id].lead_agent_id,
                             "to_agent_id": agent.id,
                             "to_agent_name": agent.name,
-                            "description": description,
+                            "description": subject,
                         }),
                     )
-                    await self._emit_agent_status(
-                        project_id, agent.id, "working", f"Delegated: {description}"
+                return
+
+            if msg_type in ("shutdown_approved", "shutdown_request"):
+                agent = self._find_agent_by_name(db, project_id, parsed.get("from", from_agent))
+                if agent:
+                    agent.status = AgentStatus.STOPPED
+                    db.add(agent)
+                    db.commit()
+                    await self.ws.broadcast(
+                        project_id,
+                        WSEvent(type=EVENT_TEAM_AGENT_COMPLETED, data={
+                            "agent_id": agent.id, "name": agent.name,
+                        }),
                     )
-                    break
-            return {}
-        return hook
+                return
+
+        # Regular text message
+        summary = msg.get("summary", "")
+        display = summary if summary else (text[:300] if text else "")
+        agent = self._find_agent_by_name(db, project_id, from_agent)
+
+        await self.ws.broadcast(
+            project_id,
+            WSEvent(type=EVENT_TEAM_MESSAGE, data={
+                "agent_id": agent.id if agent else None,
+                "from": from_agent,
+                "inbox": inbox_name,
+                "message": display,
+                "color": msg.get("color", ""),
+            }),
+        )
+
+    async def _on_file_task_update(self, project_id: int, task_data: dict, is_new: bool):
+        """File watcher detected a task change in ~/.claude/tasks/."""
+        event_type = EVENT_CLAUDE_TASK_CREATED if is_new else EVENT_CLAUDE_TASK_UPDATED
+        await self.ws.broadcast(
+            project_id,
+            WSEvent(type=event_type, data={
+                "claude_task_id": task_data.get("id"),
+                "subject": task_data.get("subject", ""),
+                "status": task_data.get("status", "pending"),
+                "owner": task_data.get("owner", ""),
+                "blocks": task_data.get("blocks", []),
+                "blocked_by": task_data.get("blockedBy", []),
+            }),
+        )
 
     # ═══════════════════════════════════════════════════════════════
     # COMMUNICATION
     # ═══════════════════════════════════════════════════════════════
 
     async def send_command_to_lead(self, project_id: int, message: str) -> dict:
-        """Send command to lead agent.
-
-        SDK mode: queue the command for the monitor loop to pick up and
-        resume the session with it.
-        CLI mode: write to stdin of the running process.
-        """
-        state = self._teams.get(project_id)
-        if not state:
-            return {"error": "No active team"}
-
-        # SDK mode: put command in the team's queue
-        if state.command_queue is not None:
-            await state.command_queue.put(message)
-            return {"sent": True}
-
-        # CLI mode: write to stdin
+        """Write command to CLI process stdin."""
         proc = self._cli_processes.get(project_id)
-        if proc and proc.returncode is None:
-            try:
-                proc.stdin.write(f"{message}\n".encode())
-                await proc.stdin.drain()
-                return {"sent": True}
-            except Exception as e:
-                return {"error": str(e)}
-
-        return {"error": "No active session"}
+        if not proc or proc.returncode is not None:
+            return {"error": "No active lead session"}
+        try:
+            proc.stdin.write(f"{message}\n".encode())
+            await proc.stdin.drain()
+            return {"sent": True}
+        except Exception as e:
+            return {"error": str(e)}
 
     async def broadcast_message(self, project_id: int, message: str) -> dict:
-        """Broadcast message to all agents."""
-        return await self.send_command_to_lead(project_id, f"Broadcast to all teammates: {message}")
+        """Broadcast message to all agents via lead."""
+        return await self.send_command_to_lead(
+            project_id, f"Broadcast to all teammates: {message}"
+        )
 
     async def send_message(self, project_id: int, to_agent_name: str, message: str) -> dict:
-        """Send message to specific agent."""
+        """Send message to specific agent via lead."""
         return await self.send_command_to_lead(
             project_id, f"Send a message to {to_agent_name}: {message}"
         )
@@ -1088,11 +671,21 @@ class UnifiedTeamOrchestrator:
         """Stop all agents, clean worktrees, remove DB records."""
         state = self._teams.pop(project_id, None)
 
-        # Signal SDK monitor to stop
+        # Stop file watcher
+        if state and state.file_watcher:
+            state.file_watcher.stop()
+        if state and state.watcher_task:
+            state.watcher_task.cancel()
+            try:
+                await state.watcher_task
+            except asyncio.CancelledError:
+                pass
+
+        # Signal stop
         if state:
             state.stop_event.set()
 
-        # Cancel SDK monitors (gracefully stops the running query)
+        # Cancel CLI monitor
         monitor = self._monitors.pop(project_id, None)
         if monitor and not monitor.done():
             monitor.cancel()
@@ -1101,21 +694,7 @@ class UnifiedTeamOrchestrator:
             except asyncio.CancelledError:
                 pass
 
-        # Cancel agent monitors
-        agents = db.exec(select(Agent).where(Agent.project_id == project_id)).all()
-        for agent in agents:
-            m = self._agent_monitors.pop(agent.id, None)
-            if m and not m.done():
-                m.cancel()
-                try:
-                    await m
-                except asyncio.CancelledError:
-                    pass
-
-        # Clean session IDs
-        self._session_ids.pop(project_id, None)
-
-        # Stop CLI processes
+        # Kill CLI process
         proc = self._cli_processes.pop(project_id, None)
         if proc and proc.returncode is None:
             try:
@@ -1139,19 +718,16 @@ class UnifiedTeamOrchestrator:
         if project:
             self.git.cleanup_all(project.repo_path)
 
-        # Remove agents from DB
-        for agent in agents:
-            db.delete(agent)
-
-        # Remove sessions
+        # Remove agents and sessions from DB
+        agents = db.exec(select(Agent).where(Agent.project_id == project_id)).all()
         for agent in agents:
             sessions = db.exec(
                 select(AgentSession).where(AgentSession.agent_id == agent.id)
             ).all()
             for s in sessions:
                 db.delete(s)
+            db.delete(agent)
         db.commit()
-
 
         logger.info(f"Team cleaned up for project-{project_id}")
         return {"cleaned": True, "project_id": project_id}
@@ -1163,19 +739,15 @@ class UnifiedTeamOrchestrator:
                 state = self._teams.get(project_id)
                 if state:
                     state.stop_event.set()
+                    if state.file_watcher:
+                        state.file_watcher.stop()
+                    if state.watcher_task:
+                        state.watcher_task.cancel()
 
-                # Cancel monitors
                 monitor = self._monitors.pop(project_id, None)
                 if monitor and not monitor.done():
                     monitor.cancel()
 
-                # Cancel agent monitors
-                for agent_id in list(self._agent_monitors.keys()):
-                    m = self._agent_monitors.pop(agent_id, None)
-                    if m and not m.done():
-                        m.cancel()
-
-                # Stop CLI processes
                 proc = self._cli_processes.pop(project_id, None)
                 if proc and proc.returncode is None:
                     proc.terminate()
@@ -1183,7 +755,6 @@ class UnifiedTeamOrchestrator:
                 pass
 
         self._teams.clear()
-        self._session_ids.clear()
         logger.info("All teams shut down")
 
     # ═══════════════════════════════════════════════════════════════
@@ -1207,9 +778,6 @@ class UnifiedTeamOrchestrator:
                 "session_status": session.status.value if session else "none",
                 "worktree": session.worktree_path if session else None,
                 "branch": session.branch_name if session else None,
-                "sdk_session_id": session.sdk_session_id if session else None,
-                "total_cost_usd": session.total_cost_usd if session else None,
-                "num_turns": session.num_turns if session else None,
             })
 
         return {
@@ -1226,18 +794,32 @@ class UnifiedTeamOrchestrator:
 
     async def check_prerequisites(self) -> dict:
         """Check required tools."""
-        sdk_ok = self._sdk_available()
         cli_ok = shutil.which(settings.CLAUDE_CLI) is not None
         return {
-            "agent_sdk": sdk_ok,
             "claude_cli": cli_ok,
-            "recommended_mode": "sdk" if sdk_ok else ("cli" if cli_ok else "none"),
+            "recommended_mode": "cli" if cli_ok else "none",
         }
 
     # ═══════════════════════════════════════════════════════════════
     # HELPERS
     # ═══════════════════════════════════════════════════════════════
 
+    def _find_agent_by_name(self, db: Session, project_id: int, name: str) -> Optional[Agent]:
+        """Find agent by name or cli_agent_id."""
+        agent = db.exec(
+            select(Agent).where(
+                Agent.project_id == project_id,
+                Agent.name == name,
+            )
+        ).first()
+        if not agent:
+            agent = db.exec(
+                select(Agent).where(
+                    Agent.project_id == project_id,
+                    Agent.cli_agent_id.contains(name),
+                )
+            ).first()
+        return agent
 
     async def _emit_agent_status(self, project_id, agent_id, status, message=""):
         await self.ws.broadcast(
@@ -1291,16 +873,24 @@ def _agent_dict(agent: Agent) -> dict:
         "team_name": agent.team_name,
         "model": agent.model,
         "parent_agent_id": agent.parent_agent_id,
-        "sdk_agent_key": agent.sdk_agent_key,
+        "cli_agent_id": agent.cli_agent_id,
+        "agent_color": agent.agent_color,
     }
 
 
-def _summarize_tool(tool_name: str, tool_input: dict) -> str:
-    if tool_name == "Bash":
-        return tool_input.get("command", "")[:100]
-    elif tool_name in ("Read", "Write", "Edit"):
-        return tool_input.get("file_path", "")[:100]
-    elif tool_name == "Task":
-        return tool_input.get("description", "")[:100]
-    else:
-        return json.dumps(tool_input)[:100]
+def _map_agent_type_to_role(agent_type: str) -> AgentRole:
+    """Map Claude Code agent type strings to our AgentRole enum."""
+    t = agent_type.lower()
+    if "lead" in t:
+        return AgentRole.LEAD
+    if "backend" in t:
+        return AgentRole.BACKEND
+    if "frontend" in t:
+        return AgentRole.FRONTEND
+    if "qa" in t or "test" in t:
+        return AgentRole.QA
+    if "security" in t:
+        return AgentRole.SECURITY
+    if "doc" in t:
+        return AgentRole.DOCS
+    return AgentRole.CUSTOM
