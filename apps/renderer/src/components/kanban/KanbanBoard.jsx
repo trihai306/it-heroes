@@ -235,10 +235,12 @@ export default function KanbanBoard() {
         if (!workflow || !workflow.steps) return;
 
         const agent = agents.find((a) => a.id === task.assigned_agent_id);
+        const isUnassigned = !task.assigned_agent_id;
         const currentRole = agent?.role || "__unassigned__";
-        const stepIdx = workflow.steps.indexOf(currentRole);
+        // Unassigned tasks are at step -1 (before the workflow), so next = step 0
+        const stepIdx = isUnassigned ? -1 : workflow.steps.indexOf(currentRole);
 
-        if (stepIdx < 0 || stepIdx >= workflow.steps.length - 1) {
+        if (!isUnassigned && (stepIdx < 0 || stepIdx >= workflow.steps.length - 1)) {
             message.info("Task already at final step");
             return;
         }
@@ -505,6 +507,9 @@ export default function KanbanBoard() {
 function WorkflowFlowBar({ workflow, tasks, agents }) {
     if (!workflow?.steps || workflow.steps.length < 2) return null;
 
+    // Count unassigned tasks (first step in the workflow pipeline)
+    const unassignedCount = tasks.filter((t) => !t.assigned_agent_id).length;
+
     // Count tasks at each step
     const stepCounts = workflow.steps.map((role) => {
         const roleAgentIds = agents.filter((a) => a.role === role).map((a) => a.id);
@@ -524,6 +529,37 @@ function WorkflowFlowBar({ workflow, tasks, agents }) {
                 <Text style={{ fontSize: 11, fontWeight: 700, color: "#818cf8" }}>
                     {workflow.name}
                 </Text>
+            </div>
+
+            {/* ── Step 0: Unassigned (entry point) ── */}
+            <div style={{ display: "flex", alignItems: "center" }}>
+                <div style={{
+                    display: "flex", alignItems: "center", gap: 6,
+                    padding: "5px 12px", borderRadius: 20,
+                    background: UNASSIGNED_COL.glow,
+                    border: `1px solid ${UNASSIGNED_COL.color}30`,
+                }}>
+                    <span style={{ fontSize: 13 }}>{UNASSIGNED_COL.emoji}</span>
+                    <Text style={{ fontSize: 11, fontWeight: 600, color: UNASSIGNED_COL.color }}>
+                        Unassigned
+                    </Text>
+                    {unassignedCount > 0 && (
+                        <Badge count={unassignedCount} size="small"
+                            style={{ backgroundColor: UNASSIGNED_COL.color, fontSize: 9, minWidth: 16, height: 16, lineHeight: "16px" }} />
+                    )}
+                </div>
+                {/* Arrow to first workflow step */}
+                <div style={{
+                    display: "flex", alignItems: "center",
+                    padding: "0 6px", color: "var(--text-faint)",
+                }}>
+                    <div style={{
+                        width: 24, height: 2,
+                        background: "linear-gradient(90deg, var(--border-default), var(--text-faint))",
+                        borderRadius: 1,
+                    }} />
+                    <RightOutlined style={{ fontSize: 8, marginLeft: -2 }} />
+                </div>
             </div>
 
             {workflow.steps.map((role, i) => {
@@ -730,9 +766,10 @@ function TaskCard({ task, index, agents, column, activeWorkflow, onMoveNext, onS
     const status = STATUS_CONFIG[task.status] || STATUS_CONFIG.todo;
     const colConfig = column.config;
 
-    // Is this task in the active workflow?
+    // Is this task in the active workflow? Unassigned = step -1, can always move next
     const canMoveNext = useMemo(() => {
-        if (!activeWorkflow?.steps || !assignedAgent) return false;
+        if (!activeWorkflow?.steps || activeWorkflow.steps.length === 0) return false;
+        if (!assignedAgent) return true; // Unassigned → can move to first step
         const idx = activeWorkflow.steps.indexOf(assignedAgent.role);
         return idx >= 0 && idx < activeWorkflow.steps.length - 1;
     }, [activeWorkflow, assignedAgent]);
