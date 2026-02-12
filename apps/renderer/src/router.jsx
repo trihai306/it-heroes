@@ -5,6 +5,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import DashboardPage from "@/pages/DashboardPage";
 import KanbanPage from "@/pages/KanbanPage";
 import TeamPage from "@/pages/TeamPage";
+import OfficePage from "@/pages/OfficePage";
 import LogsPage from "@/pages/LogsPage";
 import TerminalPage from "@/pages/TerminalPage";
 
@@ -15,6 +16,7 @@ export default function AppRouter({ logs, clearLogs, agents }) {
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/kanban" element={<KanbanPage />} />
             <Route path="/team" element={<TeamPage />} />
+            <Route path="/office" element={<OfficePage />} />
             <Route path="/logs" element={<LogsPage logs={logs} onClear={clearLogs} />} />
             <Route path="/terminal" element={<TerminalPage logs={logs} agents={agents} />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />

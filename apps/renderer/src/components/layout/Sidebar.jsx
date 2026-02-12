@@ -19,6 +19,7 @@ import {
     AppstoreOutlined,
     ProjectOutlined,
     TeamOutlined,
+    HomeOutlined,
     ThunderboltOutlined,
     CheckCircleFilled,
 } from "@ant-design/icons";
@@ -31,6 +32,7 @@ const NAV_ITEMS = [
     { key: "/dashboard", icon: <AppstoreOutlined />, label: "Dashboard", desc: "Overview & stats" },
     { key: "/kanban", icon: <ProjectOutlined />, label: "Kanban Board", desc: "Task management" },
     { key: "/team", icon: <TeamOutlined />, label: "Team", desc: "Manage agents" },
+    { key: "/office", icon: <HomeOutlined />, label: "Office", desc: "Virtual office" },
 ];
 
 /* ── Transition ──────────────────────────────────────────────── */

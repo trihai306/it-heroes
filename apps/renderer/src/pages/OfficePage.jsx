@@ -1,8 +1,8 @@
 /**
- * OfficePage — Agent overview & stats dashboard
+ * OfficePage — 2D Pixel-Art Virtual Office
  */
-import OfficeMap from "@/components/office/OfficeMap";
+import PixelOffice from "@/components/office/PixelOffice";
 
 export default function OfficePage() {
-    return <OfficeMap />;
+    return <PixelOffice />;
 }
