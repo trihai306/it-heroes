@@ -1,0 +1,20 @@
+{
+    "name": "it-heroes-electron",
+    "version": "1.0.0",
+    "description": "IT Heroes — Multi-Agent Desktop Platform",
+    "main": "main.js",
+    "scripts": {
+        "start": "electron .",
+        "dev": "concurrently \"npm run dev:fe\" \"npm run dev:backend\" \"wait-on http://localhost:5173 && electron .\"",
+        "dev:app": "concurrently \"npm run dev:fe\" \"wait-on http://localhost:5173 && electron .\"",
+        "dev:docker": "SKIP_BACKEND=1 wait-on http://localhost:5173 && SKIP_BACKEND=1 electron .",
+        "dev:fe": "cd ../FE && npm run dev",
+        "dev:backend": "cd ../backend && source venv/bin/activate && python3 -m uvicorn main:app --reload --port 8000",
+        "build": "cd ../FE && npm run build"
+    },
+    "devDependencies": {
+        "electron": "^35.0.0",
+        "concurrently": "^9.1.0",
+        "wait-on": "^8.0.0"
+    }
+}
